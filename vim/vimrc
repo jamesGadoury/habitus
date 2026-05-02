@@ -1,0 +1,303 @@
+" vimrc — Developer-oriented Vim configuration
+" Managed by: habitus/vim/vimrc → symlinked to ~/.vimrc by install.sh
+" Requires: vim (not vim-tiny) for syntax, autocmd, and persistent undo
+
+" ---------------------------------------------------------------------------
+" Core
+" ---------------------------------------------------------------------------
+
+" Disable vi compatibility — unlocks all Vim improvements (must be first)
+set nocompatible
+
+" Use UTF-8 internally and when writing files
+set encoding=utf-8
+set fileencoding=utf-8
+
+" Enable filetype detection, per-filetype plugins, and per-filetype indent rules
+filetype plugin indent on
+
+" Enable syntax highlighting
+syntax on
+
+" ---------------------------------------------------------------------------
+" Indentation
+" ---------------------------------------------------------------------------
+
+" Insert spaces instead of tab characters when pressing Tab
+set expandtab
+
+" Number of spaces a tab character displays as
+set tabstop=4
+
+" Number of spaces used for each level of auto-indent (>>, <<, etc.)
+set shiftwidth=4
+
+" Number of spaces inserted/removed when pressing Tab/Backspace
+set softtabstop=4
+
+" Copy the indent of the current line when creating a new line
+set autoindent
+
+" Add an indent level after braces, keywords, etc.
+set smartindent
+
+" Round indent to the nearest multiple of shiftwidth when using >> and <<
+set shiftround
+
+" ---------------------------------------------------------------------------
+" UI
+" ---------------------------------------------------------------------------
+
+" Show absolute line number on the current line
+set number
+
+" Show relative line numbers on all other lines (hybrid numbering)
+set relativenumber
+
+" Highlight the line the cursor is on
+set cursorline
+
+" Briefly jump to the matching bracket when one is inserted
+set showmatch
+
+" Show partial commands in the bottom-right as you type them
+set showcmd
+
+" Show current mode (INSERT, VISUAL, etc.) in the status line
+set showmode
+
+" Enhanced tab-completion menu for command-line (:e, :b, etc.)
+set wildmenu
+
+" First Tab completes the longest common prefix, second Tab opens the menu
+set wildmode=longest:full,full
+
+" Ignore these patterns in file completion (build artifacts, caches)
+set wildignore+=*.o,*.pyc,*.pyo,__pycache__,*.swp,.git,node_modules
+
+" Always show the status line (even with only one window)
+set laststatus=2
+
+" Show line number, column number, and scroll percentage in the status line
+set ruler
+
+" Keep 8 lines visible above and below the cursor when scrolling
+set scrolloff=8
+
+" Keep 8 columns visible to the left and right when side-scrolling
+set sidescrolloff=8
+
+" Always show the sign column so the editor doesn't shift when signs appear
+set signcolumn=yes
+
+" Use dark-optimized colors (most terminal devs use dark themes)
+set background=dark
+
+" Enable 24-bit (true color) if the terminal supports it
+if has('termguicolors')
+    set termguicolors
+endif
+
+" Use the habamax colorscheme — a solid built-in dark theme (Vim 9+)
+silent! colorscheme habamax
+
+" ---------------------------------------------------------------------------
+" Search
+" ---------------------------------------------------------------------------
+
+" Show matches incrementally as you type the search pattern
+set incsearch
+
+" Highlight all matches for the current search
+set hlsearch
+
+" Search case-insensitively by default
+set ignorecase
+
+" Override ignorecase when the search pattern contains uppercase letters
+set smartcase
+
+" ---------------------------------------------------------------------------
+" Buffers and Files
+" ---------------------------------------------------------------------------
+
+" Allow switching to another buffer without saving the current one first
+set hidden
+
+" Don't create ~ backup files
+set nobackup
+
+" Don't create a backup before overwriting a file
+set nowritebackup
+
+" Don't create .swp swap files
+set noswapfile
+
+" Re-read files automatically when changed outside of Vim
+set autoread
+
+" ---------------------------------------------------------------------------
+" Performance / Responsiveness
+" ---------------------------------------------------------------------------
+
+" Trigger CursorHold events after 300ms of inactivity (default is 4000ms)
+set updatetime=300
+
+" Timeout for multi-key mappings (e.g., leader sequences)
+set timeoutlen=500
+
+" Timeout for terminal key codes — lower means faster Esc response
+set ttimeoutlen=10
+
+" Don't redraw the screen during macros and scripts (faster execution)
+set lazyredraw
+
+" ---------------------------------------------------------------------------
+" Splits
+" ---------------------------------------------------------------------------
+
+" Open horizontal splits below the current window
+set splitbelow
+
+" Open vertical splits to the right of the current window
+set splitright
+
+" ---------------------------------------------------------------------------
+" Wrapping
+" ---------------------------------------------------------------------------
+
+" Don't visually wrap long lines
+set nowrap
+
+" If wrap is turned on, break at word boundaries instead of mid-word
+set linebreak
+
+" ---------------------------------------------------------------------------
+" Persistent Undo
+" ---------------------------------------------------------------------------
+
+" Save undo history to disk so it survives between sessions
+if has('persistent_undo')
+    set undofile
+    set undodir=~/.vim/undodir
+endif
+
+" ---------------------------------------------------------------------------
+" Clipboard
+" ---------------------------------------------------------------------------
+
+" Use the system clipboard for all yank/paste operations (requires +clipboard)
+if has('clipboard')
+    set clipboard=unnamedplus
+endif
+
+" ---------------------------------------------------------------------------
+" Backspace
+" ---------------------------------------------------------------------------
+
+" Make backspace work over autoindent, line breaks, and the start of insert
+set backspace=indent,eol,start
+
+" ---------------------------------------------------------------------------
+" Whitespace Visualization
+" ---------------------------------------------------------------------------
+
+" Show invisible characters
+set list
+
+" Define how invisible characters are displayed:
+"   tab:→\    — tabs show as → followed by spaces
+"   trail:·   — trailing spaces show as ·
+"   extends:› — characters past the right edge when nowrap is on
+"   precedes:‹ — characters past the left edge when nowrap is on
+set listchars=tab:→\ ,trail:·,extends:›,precedes:‹
+
+" ---------------------------------------------------------------------------
+" Leader Key
+" ---------------------------------------------------------------------------
+
+" Set Space as the leader key (most ergonomic, very popular in modern setups)
+let mapleader = " "
+
+" ---------------------------------------------------------------------------
+" Key Mappings
+" ---------------------------------------------------------------------------
+
+" Clear search highlight with Space+h
+nnoremap <leader>h :nohlsearch<CR>
+
+" Quick save with Space+w
+nnoremap <leader>w :w<CR>
+
+" Quick quit with Space+q
+nnoremap <leader>q :q<CR>
+
+" Navigate between splits with Ctrl+h/j/k/l (no Ctrl-W prefix needed)
+nnoremap <C-h> <C-w>h
+nnoremap <C-j> <C-w>j
+nnoremap <C-k> <C-w>k
+nnoremap <C-l> <C-w>l
+
+" Move selected lines up/down in visual mode and re-indent
+vnoremap J :m '>+1<CR>gv=gv
+vnoremap K :m '<-2<CR>gv=gv
+
+" Keep cursor centered when scrolling half-pages
+nnoremap <C-d> <C-d>zz
+nnoremap <C-u> <C-u>zz
+
+" Keep cursor centered when jumping between search matches
+nnoremap n nzzzv
+nnoremap N Nzzzv
+
+" Paste over a selection without losing the yanked text
+xnoremap <leader>p "_dP
+
+" Buffer navigation: next, previous, close
+nnoremap <leader>bn :bnext<CR>
+nnoremap <leader>bp :bprevious<CR>
+nnoremap <leader>bd :bdelete<CR>
+
+" ---------------------------------------------------------------------------
+" netrw — Built-in File Explorer
+" ---------------------------------------------------------------------------
+
+" Hide the info banner at the top of netrw
+let g:netrw_banner = 0
+
+" Use tree-style listing (indented hierarchy)
+let g:netrw_liststyle = 3
+
+" Open files in the previous window (not inside the explorer)
+let g:netrw_browse_split = 4
+
+" Explorer window takes 25% of the screen width
+let g:netrw_winsize = 25
+
+" Toggle the file explorer sidebar with Space+e
+nnoremap <leader>e :Lexplore<CR>
+
+" ---------------------------------------------------------------------------
+" Autocommands
+" ---------------------------------------------------------------------------
+
+augroup mgmt_vimrc
+    " Clear any previous autocommands in this group (prevents duplicates)
+    autocmd!
+
+    " Use 2-space indentation for web and config languages
+    autocmd FileType html,css,javascript,typescript,json,yaml
+        \ setlocal tabstop=2 shiftwidth=2 softtabstop=2
+
+    " Use 4-space indentation for shell scripts
+    autocmd FileType sh setlocal tabstop=4 shiftwidth=4 softtabstop=4
+
+    " Strip trailing whitespace on every save
+    autocmd BufWritePre * %s/\s\+$//e
+
+    " Restore cursor to last known position when reopening a file
+    autocmd BufReadPost *
+        \ if line("'\"") > 1 && line("'\"") <= line("$")
+        \ | exe "normal! g'\""
+        \ | endif
+augroup END

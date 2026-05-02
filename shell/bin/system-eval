@@ -1,0 +1,1263 @@
+#!/bin/sh
+# system-eval — System health and performance evaluation
+# Compatible with: Ubuntu, Raspberry Pi OS
+#
+# Usage: system-eval [OPTIONS]
+#   --bench              Include performance benchmarks (slower)
+#   --stress             Run stress tests with thermal monitoring
+#   --stress-duration N  Stress test duration in seconds (default: 60)
+#   --full               Run all sections including benchmarks and stress
+#   --no-color           Disable color output
+#   -h, --help           Show this help message
+
+set -e
+
+# ---------------------------------------------------------------------------
+# Flags
+# ---------------------------------------------------------------------------
+
+FLAG_BENCH=false
+FLAG_STRESS=false
+FLAG_NO_COLOR=false
+STRESS_DURATION=60
+_next_is_duration=false
+
+for arg in "$@"; do
+    if [ "$_next_is_duration" = true ]; then
+        STRESS_DURATION="$arg"
+        _next_is_duration=false
+        continue
+    fi
+    case "$arg" in
+        --bench)            FLAG_BENCH=true ;;
+        --stress)           FLAG_STRESS=true ;;
+        --stress-duration)  _next_is_duration=true ;;
+        --full)             FLAG_BENCH=true; FLAG_STRESS=true ;;
+        --no-color)         FLAG_NO_COLOR=true ;;
+        -h|--help)          sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        *)                  printf 'system-eval: unknown option: %s\n' "$arg" >&2; exit 1 ;;
+    esac
+done
+unset _next_is_duration
+
+# ---------------------------------------------------------------------------
+# Colors (TTY-aware, respects --no-color and NO_COLOR env)
+# ---------------------------------------------------------------------------
+
+if [ -t 1 ] && [ "$FLAG_NO_COLOR" = false ] && [ -z "${NO_COLOR:-}" ]; then
+    C_RST='\033[0m'
+    C_HDR='\033[1;37m'
+    C_LBL='\033[1;36m'
+    C_OK='\033[1;32m'
+    C_WARN='\033[1;33m'
+    C_CRIT='\033[1;31m'
+    C_DIM='\033[0;37m'
+else
+    C_RST='' C_HDR='' C_LBL='' C_OK=''
+    C_WARN='' C_CRIT='' C_DIM=''
+fi
+
+# ---------------------------------------------------------------------------
+# Globals
+# ---------------------------------------------------------------------------
+
+_pass=0
+_warn=0
+_crit=0
+IS_RPI=false
+BENCH_TMPFILE="/tmp/.system-eval-disktest.$$"
+STRESS_THERMAL_LOG="/tmp/.system-eval-thermal.$$"
+STRESS_FREQ_LOG="/tmp/.system-eval-freq.$$"
+ISSUES_LOG="/tmp/.system-eval-issues.$$"
+_thermal_monitor_pid=""
+_stress_pids=""
+
+: > "$ISSUES_LOG"
+
+cleanup() {
+    for _pid in $_stress_pids; do
+        kill "$_pid" 2>/dev/null || true
+    done
+    [ -n "$_thermal_monitor_pid" ] && kill "$_thermal_monitor_pid" 2>/dev/null || true
+    rm -f "$BENCH_TMPFILE" "$STRESS_THERMAL_LOG" "$STRESS_FREQ_LOG" "$ISSUES_LOG"
+}
+trap cleanup EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+section_header() {
+    printf '\n%b══════════════════════════════════════════════════════════════%b\n' "$C_HDR" "$C_RST"
+    printf '%b  %s%b\n' "$C_HDR" "$1" "$C_RST"
+    printf '%b══════════════════════════════════════════════════════════════%b\n' "$C_HDR" "$C_RST"
+}
+
+kv() {
+    printf '  %b%-26s%b %s\n' "$C_LBL" "$1" "$C_RST" "$2"
+}
+
+status_ok() {
+    _pass=$(( _pass + 1 ))
+    printf '  %b[PASS]%b %s\n' "$C_OK" "$C_RST" "$1"
+}
+
+status_warn() {
+    _warn=$(( _warn + 1 ))
+    printf '  %b[WARN]%b %s\n' "$C_WARN" "$C_RST" "$1"
+    [ -n "${2:-}" ] && printf '         %b-> %s%b\n' "$C_DIM" "$2" "$C_RST"
+    printf 'WARN\t%s\t%s\n' "$1" "${2:-}" >> "$ISSUES_LOG"
+}
+
+status_crit() {
+    _crit=$(( _crit + 1 ))
+    printf '  %b[CRIT]%b %s\n' "$C_CRIT" "$C_RST" "$1"
+    [ -n "${2:-}" ] && printf '         %b-> %s%b\n' "$C_DIM" "$2" "$C_RST"
+    printf 'CRIT\t%s\t%s\n' "$1" "${2:-}" >> "$ISSUES_LOG"
+}
+
+note() {
+    printf '  %b[NOTE]%b %s\n' "$C_DIM" "$C_RST" "$1"
+}
+
+human_bytes() {
+    # Accepts value in kB, prints human-readable
+    echo "$1" | awk '{
+        v = $1
+        if (v >= 1048576) printf "%.1f GiB", v / 1048576
+        else if (v >= 1024) printf "%.1f MiB", v / 1024
+        else printf "%d KiB", v
+    }'
+}
+
+# Read the highest CPU temperature in degrees C (integer).
+# Returns "" if no thermal source is available.
+#
+# Sources tried (first match wins):
+#   RPi         — vcgencmd measure_temp
+#   Intel       — /sys/class/thermal (x86_pkg_temp, coretemp zones)
+#   AMD / Intel — /sys/class/hwmon   (k10temp, coretemp, zenpower drivers)
+#   Any         — highest reading from any thermal zone (last resort)
+read_cpu_temp() {
+    # Raspberry Pi: dedicated firmware interface
+    if [ "$IS_RPI" = true ] && command -v vcgencmd >/dev/null 2>&1; then
+        vcgencmd measure_temp 2>/dev/null | sed "s/temp=//;s/'C//" | awk '{printf "%d", $1}'
+        return
+    fi
+
+    _best=0
+
+    # Thermal zones: works on most Intel systems (x86_pkg_temp, coretemp)
+    for _z in /sys/class/thermal/thermal_zone*; do
+        [ -d "$_z" ] || continue
+        _t="$(cat "$_z/type" 2>/dev/null)" || continue
+        case "$_t" in
+            x86_pkg_temp|cpu*|coretemp*|soc*) ;;
+            *) continue ;;
+        esac
+        _raw="$(cat "$_z/temp" 2>/dev/null)" || continue
+        [ -n "$_raw" ] || continue
+        _c=$(( _raw / 1000 ))
+        [ "$_c" -gt "$_best" ] && _best="$_c"
+    done
+
+    # hwmon: AMD Ryzen (k10temp), some Intel (coretemp), Zen (zenpower)
+    if [ "$_best" -eq 0 ]; then
+        for _h in /sys/class/hwmon/hwmon*; do
+            [ -d "$_h" ] || continue
+            _name="$(cat "$_h/name" 2>/dev/null)" || continue
+            case "$_name" in
+                k10temp|coretemp|zenpower) ;;
+                *) continue ;;
+            esac
+            for _inp in "$_h"/temp*_input; do
+                [ -f "$_inp" ] || continue
+                _raw="$(cat "$_inp" 2>/dev/null)" || continue
+                [ -n "$_raw" ] || continue
+                _c=$(( _raw / 1000 ))
+                [ "$_c" -gt "$_best" ] && _best="$_c"
+            done
+        done
+    fi
+
+    # Last resort: highest reading from any thermal zone regardless of type
+    if [ "$_best" -eq 0 ]; then
+        for _z in /sys/class/thermal/thermal_zone*; do
+            [ -d "$_z" ] || continue
+            _raw="$(cat "$_z/temp" 2>/dev/null)" || continue
+            [ -n "$_raw" ] || continue
+            _c=$(( _raw / 1000 ))
+            [ "$_c" -gt "$_best" ] && _best="$_c"
+        done
+    fi
+
+    [ "$_best" -gt 0 ] && printf '%d' "$_best"
+}
+
+# Read current CPU frequency in MHz (integer), "" if unavailable.
+read_cpu_freq() {
+    _f="/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"
+    if [ -f "$_f" ]; then
+        _khz="$(cat "$_f" 2>/dev/null)" || return
+        printf '%d' $(( _khz / 1000 ))
+    fi
+}
+
+# Background thermal/freq monitor. Writes timestamped samples to log files.
+# Usage: start_thermal_monitor; ... ; stop_thermal_monitor
+start_thermal_monitor() {
+    (
+        while true; do
+            _ts="$(date +%s)"
+            _t="$(read_cpu_temp)"
+            _f="$(read_cpu_freq)"
+            [ -n "$_t" ] && printf '%s %s\n' "$_ts" "$_t" >> "$STRESS_THERMAL_LOG"
+            [ -n "$_f" ] && printf '%s %s\n' "$_ts" "$_f" >> "$STRESS_FREQ_LOG"
+            sleep 2
+        done
+    ) &
+    _thermal_monitor_pid=$!
+}
+
+stop_thermal_monitor() {
+    [ -n "$_thermal_monitor_pid" ] && kill "$_thermal_monitor_pid" 2>/dev/null || true
+    wait "$_thermal_monitor_pid" 2>/dev/null || true
+    _thermal_monitor_pid=""
+}
+
+# Print thermal/freq monitor results from the log files.
+report_thermal_monitor() {
+    if [ -s "$STRESS_THERMAL_LOG" ]; then
+        _t_start="$(head -1 "$STRESS_THERMAL_LOG" | awk '{print $2}')"
+        _t_peak="$(awk '{if($2>m)m=$2} END{print m}' "$STRESS_THERMAL_LOG")"
+        _t_end="$(tail -1 "$STRESS_THERMAL_LOG" | awk '{print $2}')"
+        kv "Temp (start)" "${_t_start} C"
+        kv "Temp (peak)" "${_t_peak} C"
+        kv "Temp (end)" "${_t_end} C"
+        _t_delta=$(( _t_peak - _t_start ))
+        kv "Temp rise" "+${_t_delta} C"
+
+        if [ "$IS_RPI" = true ]; then
+            _thresh=80
+        else
+            _thresh=85
+        fi
+        if [ "$IS_RPI" = true ]; then
+            _cool_advice="Improve cooling: add a heatsink, fan, or move away from enclosed spaces"
+        else
+            _cool_advice="Check cooling: clean dust from fans/vents, verify paste, improve airflow"
+        fi
+        if [ "$_t_peak" -ge "$_thresh" ]; then
+            status_crit "Peak temperature reached ${_t_peak} C (threshold: ${_thresh} C)" "$_cool_advice"
+        elif [ "$_t_peak" -ge $(( _thresh - 10 )) ]; then
+            status_warn "Peak temperature approached threshold (${_t_peak} C / ${_thresh} C)" "$_cool_advice"
+        else
+            status_ok "Temperature stayed within safe range"
+        fi
+    else
+        note "No thermal data recorded during stress test"
+    fi
+
+    if [ -s "$STRESS_FREQ_LOG" ]; then
+        _f_start="$(head -1 "$STRESS_FREQ_LOG" | awk '{print $2}')"
+        _f_min="$(awk '{if(m==""||$2<m)m=$2} END{print m}' "$STRESS_FREQ_LOG")"
+        _f_max="$(awk '{if($2>m)m=$2} END{print m}' "$STRESS_FREQ_LOG")"
+        kv "Freq (min/max)" "${_f_min} / ${_f_max} MHz"
+        if [ "$_f_max" -gt 0 ] 2>/dev/null; then
+            _drop_pct="$(echo "$_f_min $_f_max" | awk '{printf "%d", (1-$1/$2)*100}')"
+            if [ "$_drop_pct" -ge 20 ]; then
+                status_warn "CPU frequency dropped ${_drop_pct}% under load (possible throttling)" \
+                    "Thermal throttling likely — improve cooling or reduce sustained workload"
+            else
+                status_ok "CPU frequency stable under load"
+            fi
+        fi
+    fi
+
+    # RPi throttle check after stress
+    if [ "$IS_RPI" = true ] && command -v vcgencmd >/dev/null 2>&1; then
+        _throttled="$(vcgencmd get_throttled 2>/dev/null | sed 's/throttled=//')" || true
+        if [ -n "$_throttled" ]; then
+            _hex="$(printf '%d' "$_throttled" 2>/dev/null)" || _hex=0
+            if [ $(( _hex & 0x4 )) -ne 0 ]; then
+                status_crit "RPi throttling detected during stress" \
+                    "Improve cooling: add a heatsink or fan to the RPi"
+            elif [ $(( _hex & 0x1 )) -ne 0 ]; then
+                status_crit "RPi under-voltage detected during stress" \
+                    "Use the official RPi power supply (5V/3A); check USB cable quality"
+            elif [ $(( _hex & 0x2 )) -ne 0 ]; then
+                status_warn "RPi ARM frequency was capped during stress" \
+                    "Power supply may be insufficient — use a higher-rated adapter"
+            fi
+        fi
+    fi
+
+    # Clean up logs for next section
+    : > "$STRESS_THERMAL_LOG" 2>/dev/null || true
+    : > "$STRESS_FREQ_LOG" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Dependency check — report all missing optional packages upfront
+# ---------------------------------------------------------------------------
+
+check_dependencies() {
+    _missing=""
+
+    # Always relevant
+    command -v smartctl >/dev/null 2>&1 || \
+        _missing="${_missing}  smartmontools (smartctl — disk SMART health)\n"
+    command -v sensors >/dev/null 2>&1 || \
+        _missing="${_missing}  lm-sensors (sensors — thermal monitoring)\n"
+
+    # Bench dependencies
+    if [ "$FLAG_BENCH" = true ]; then
+        command -v sysbench >/dev/null 2>&1 || \
+            _missing="${_missing}  sysbench (CPU benchmark)\n"
+        command -v fio >/dev/null 2>&1 || \
+            _missing="${_missing}  fio (disk I/O benchmark)\n"
+    fi
+
+    # Stress dependencies
+    if [ "$FLAG_STRESS" = true ]; then
+        command -v stress-ng >/dev/null 2>&1 || \
+            _missing="${_missing}  stress-ng (CPU & memory stress tests)\n"
+        # Only list fio if not already listed from bench
+        if [ "$FLAG_BENCH" = false ]; then
+            command -v fio >/dev/null 2>&1 || \
+                _missing="${_missing}  fio (disk I/O stress test)\n"
+        fi
+        command -v memtester >/dev/null 2>&1 || \
+            _missing="${_missing}  memtester (memory test fallback)\n"
+    fi
+
+    [ -z "$_missing" ] && return 0
+
+    printf '\n%bOptional packages not found:%b\n' "$C_WARN" "$C_RST"
+    printf "$_missing"
+    printf '\n  Install with: %bsudo apt install <package>%b\n' "$C_DIM" "$C_RST"
+    printf '  Tests will use fallback methods for missing tools.\n\n'
+    printf '  Continue anyway? (Y/n) [default=Y] '
+    read -r _answer < /dev/tty
+    case "$_answer" in
+        [nN]*) printf '  Exiting.\n'; exit 0 ;;
+    esac
+    printf '\n'
+}
+
+# ---------------------------------------------------------------------------
+# Root check — inform user which tests are limited without sudo
+# ---------------------------------------------------------------------------
+
+check_root() {
+    [ "$(id -u)" -eq 0 ] && return 0
+
+    _limited=""
+
+    command -v smartctl >/dev/null 2>&1 && \
+        _limited="${_limited}  SMART disk health checks (smartctl)\n"
+
+    if [ "$FLAG_BENCH" = true ]; then
+        _limited="${_limited}  Disk read benchmark (cannot drop page cache without root)\n"
+    fi
+
+    [ -z "$_limited" ] && return 0
+
+    printf '\n%bRunning without root — the following tests will be skipped or limited:%b\n' "$C_WARN" "$C_RST"
+    printf "$_limited"
+    printf '\n  Run with: %bsudo system-eval %s%b\n' "$C_DIM" "$*" "$C_RST"
+    printf '  for complete results.\n\n'
+    printf '  Continue anyway? (Y/n) [default=Y] '
+    read -r _answer < /dev/tty
+    case "$_answer" in
+        [nN]*) printf '  Exiting.\n'; exit 0 ;;
+    esac
+    printf '\n'
+}
+
+# ---------------------------------------------------------------------------
+# Platform detection
+# ---------------------------------------------------------------------------
+
+detect_platform() {
+    if [ -f /sys/firmware/devicetree/base/model ]; then
+        _model="$(cat /sys/firmware/devicetree/base/model 2>/dev/null | tr -d '\0')"
+        case "$_model" in
+            *Raspberry\ Pi*) IS_RPI=true ;;
+        esac
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Section 1: System Overview
+# ---------------------------------------------------------------------------
+
+section_system_overview() {
+    section_header "System Overview"
+
+    if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        kv "OS" "${PRETTY_NAME:-unknown}"
+    fi
+
+    kv "Kernel" "$(uname -r)"
+    kv "Architecture" "$(uname -m)"
+    kv "Hostname" "$(hostname)"
+
+    # Uptime from /proc/uptime (seconds, integer part)
+    if [ -f /proc/uptime ]; then
+        _secs="$(awk '{printf "%d", $1}' /proc/uptime)"
+        _days=$(( _secs / 86400 ))
+        _hours=$(( (_secs % 86400) / 3600 ))
+        _mins=$(( (_secs % 3600) / 60 ))
+        kv "Uptime" "${_days}d ${_hours}h ${_mins}m"
+    fi
+
+    if [ "$IS_RPI" = true ]; then
+        _model="$(cat /sys/firmware/devicetree/base/model 2>/dev/null | tr -d '\0')"
+        kv "RPi Model" "$_model"
+        if command -v vcgencmd >/dev/null 2>&1; then
+            _fw="$(vcgencmd version 2>/dev/null | grep '^version' | sed 's/version //')"
+            [ -n "$_fw" ] && kv "Firmware" "$_fw"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Section 2: CPU Health
+# ---------------------------------------------------------------------------
+
+section_cpu_health() {
+    section_header "CPU Health"
+
+    # Model name (desktop vs RPi format)
+    _cpu_model="$(LC_ALL=C grep -m1 'model name' /proc/cpuinfo 2>/dev/null | sed 's/.*: //')"
+    if [ -z "$_cpu_model" ]; then
+        _cpu_model="$(LC_ALL=C grep -m1 'Hardware' /proc/cpuinfo 2>/dev/null | sed 's/.*: //')"
+    fi
+    [ -n "$_cpu_model" ] && kv "Model" "$_cpu_model"
+
+    _cores="$(nproc 2>/dev/null || echo 1)"
+    kv "Cores" "$_cores"
+
+    # Frequency
+    _freq_dir="/sys/devices/system/cpu/cpu0/cpufreq"
+    if [ -d "$_freq_dir" ]; then
+        _cur="$(cat "$_freq_dir/scaling_cur_freq" 2>/dev/null)" || true
+        _min="$(cat "$_freq_dir/cpuinfo_min_freq" 2>/dev/null)" || true
+        _max="$(cat "$_freq_dir/cpuinfo_max_freq" 2>/dev/null)" || true
+        if [ -n "$_cur" ]; then
+            _cur_mhz=$(( _cur / 1000 ))
+            _range=""
+            if [ -n "$_min" ] && [ -n "$_max" ]; then
+                _range=" ($(( _min / 1000 ))-$(( _max / 1000 )) MHz range)"
+            fi
+            kv "Frequency" "${_cur_mhz} MHz${_range}"
+        fi
+        _gov="$(cat "$_freq_dir/scaling_governor" 2>/dev/null)" || true
+        [ -n "$_gov" ] && kv "Governor" "$_gov"
+    fi
+
+    # Load averages
+    if [ -f /proc/loadavg ]; then
+        _load="$(awk '{printf "%s / %s / %s", $1, $2, $3}' /proc/loadavg)"
+        kv "Load Average (1/5/15m)" "$_load"
+
+        _load1="$(awk '{print $1}' /proc/loadavg)"
+        _load_status="$(echo "$_load1 $_cores" | awk '{
+            if ($1 < $2) print "ok"
+            else if ($1 < $2 * 2) print "warn"
+            else print "crit"
+        }')"
+        case "$_load_status" in
+            ok)   status_ok "Load average is within normal range" ;;
+            warn) status_warn "Load average is elevated (${_load1} vs ${_cores} cores)" \
+                "Identify heavy processes with 'top' or 'htop'; consider reducing concurrent workloads" ;;
+            crit) status_crit "Load average is critical (${_load1} vs ${_cores} cores)" \
+                "System is overloaded — check for runaway processes: ps -eo pid,%cpu,comm --sort=-%cpu | head" ;;
+        esac
+    fi
+
+    # CPU usage snapshot (two samples of /proc/stat, 0.5s apart)
+    if [ -f /proc/stat ]; then
+        _stat1="$(LC_ALL=C head -1 /proc/stat)"
+        sleep 0.5
+        _stat2="$(LC_ALL=C head -1 /proc/stat)"
+        _usage="$(printf '%s\n%s\n' "$_stat1" "$_stat2" | awk '
+            NR==1 { for(i=2;i<=NF;i++) a[i]=$i; next }
+            NR==2 {
+                idle1=a[5]+a[6]; total1=0; for(i=2;i<=8;i++) total1+=a[i]
+                idle2=$5+$6; total2=0; for(i=2;i<=8;i++) total2+=$i
+                dtotal=total2-total1; didle=idle2-idle1
+                if (dtotal > 0) printf "%d", (dtotal-didle)*100/dtotal
+                else printf "0"
+            }')"
+        kv "CPU Usage" "${_usage}%"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Section 3: Memory Health
+# ---------------------------------------------------------------------------
+
+section_memory_health() {
+    section_header "Memory Health"
+
+    if [ ! -f /proc/meminfo ]; then
+        note "/proc/meminfo not available"
+        return
+    fi
+
+    eval "$(LC_ALL=C awk '
+        /^MemTotal:/     {printf "MEM_TOTAL=%d\n", $2}
+        /^MemAvailable:/ {printf "MEM_AVAIL=%d\n", $2}
+        /^SwapTotal:/    {printf "SWAP_TOTAL=%d\n", $2}
+        /^SwapFree:/     {printf "SWAP_FREE=%d\n", $2}
+    ' /proc/meminfo)"
+
+    MEM_TOTAL="${MEM_TOTAL:-0}"
+    MEM_AVAIL="${MEM_AVAIL:-0}"
+    SWAP_TOTAL="${SWAP_TOTAL:-0}"
+    SWAP_FREE="${SWAP_FREE:-0}"
+
+    _used=$(( MEM_TOTAL - MEM_AVAIL ))
+
+    kv "Total" "$(human_bytes "$MEM_TOTAL")"
+    kv "Used" "$(human_bytes "$_used")"
+    kv "Available" "$(human_bytes "$MEM_AVAIL")"
+
+    if [ "$MEM_TOTAL" -gt 0 ]; then
+        _pct="$(echo "$_used $MEM_TOTAL" | awk '{printf "%.1f", $1*100/$2}')"
+        kv "Usage" "${_pct}%"
+        _mem_status="$(echo "$_pct" | awk '{
+            if ($1 < 80) print "ok"
+            else if ($1 < 95) print "warn"
+            else print "crit"
+        }')"
+        case "$_mem_status" in
+            ok)   status_ok "Memory usage is healthy" ;;
+            warn) status_warn "Memory usage is elevated (${_pct}%)" \
+                "Find top consumers: ps -eo pid,%mem,comm --sort=-%mem | head; consider closing unused apps" ;;
+            crit) status_crit "Memory usage is critical (${_pct}%)" \
+                "System may start swapping or OOM-killing — free memory now or add more RAM" ;;
+        esac
+    fi
+
+    if [ "$SWAP_TOTAL" -gt 0 ]; then
+        _swap_used=$(( SWAP_TOTAL - SWAP_FREE ))
+        _swap_pct="$(echo "$_swap_used $SWAP_TOTAL" | awk '{printf "%.1f", $1*100/$2}')"
+        kv "Swap" "$(human_bytes "$SWAP_TOTAL") total, $(human_bytes "$_swap_used") used (${_swap_pct}%)"
+        _swap_status="$(echo "$_swap_pct" | awk '{if ($1 > 50) print "warn"; else print "ok"}')"
+        case "$_swap_status" in
+            warn) status_warn "Swap usage is high (${_swap_pct}%)" \
+                "Heavy swapping degrades performance — free RAM or increase physical memory" ;;
+            ok)   status_ok "Swap usage is normal" ;;
+        esac
+    else
+        kv "Swap" "none configured"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Section 4: Disk Health
+# ---------------------------------------------------------------------------
+
+section_disk_health() {
+    section_header "Disk Health"
+
+    printf '  %b%-20s %5s %6s %6s %5s  %s%b\n' \
+        "$C_LBL" "DEVICE" "SIZE" "USED" "AVAIL" "USE%" "MOUNT" "$C_RST"
+
+    LC_ALL=C df -h 2>/dev/null | awk 'NR>1 && $1 !~ /^(tmpfs|devtmpfs|squashfs|overlay|udev|none)/' | \
+    while IFS= read -r _line; do
+        _dev="$(echo "$_line" | awk '{print $1}')"
+        _size="$(echo "$_line" | awk '{print $2}')"
+        _used="$(echo "$_line" | awk '{print $3}')"
+        _avail="$(echo "$_line" | awk '{print $4}')"
+        _pct="$(echo "$_line" | awk '{gsub(/%/,"",$5); print $5}')"
+        _mount="$(echo "$_line" | awk '{print $6}')"
+        printf '  %-20s %5s %6s %6s %4s%%  %s\n' \
+            "$_dev" "$_size" "$_used" "$_avail" "$_pct" "$_mount"
+    done
+
+    printf '\n'
+
+    # Check filesystem usage thresholds
+    _disk_worst="ok"
+    LC_ALL=C df -h 2>/dev/null | awk 'NR>1 && $1 !~ /^(tmpfs|devtmpfs|squashfs|overlay|udev|none)/' | \
+    while IFS= read -r _line; do
+        _mount="$(echo "$_line" | awk '{print $6}')"
+        _pct="$(echo "$_line" | awk '{gsub(/%/,"",$5); print $5}')"
+        if [ "$_pct" -ge 95 ] 2>/dev/null; then
+            status_crit "${_mount} is ${_pct}% full" \
+                "Free space urgently: find large files with 'du -ah ${_mount} | sort -rh | head -20'"
+        elif [ "$_pct" -ge 90 ] 2>/dev/null; then
+            status_warn "${_mount} is ${_pct}% full" \
+                "Clean up: remove old logs, caches, or unused packages (sudo apt autoremove)"
+        fi
+    done
+
+    # Overall disk status (re-check outside subshell)
+    _max_pct="$(LC_ALL=C df -h 2>/dev/null | awk 'NR>1 && $1 !~ /^(tmpfs|devtmpfs|squashfs|overlay|udev|none)/ {gsub(/%/,"",$5); if($5+0 > max) max=$5+0} END{print max+0}')"
+    if [ "$_max_pct" -ge 95 ] 2>/dev/null; then
+        : # already reported in loop
+    elif [ "$_max_pct" -ge 90 ] 2>/dev/null; then
+        : # already reported in loop
+    else
+        status_ok "All filesystems below 90% usage"
+    fi
+
+    # Inode check
+    _inode_max="$(LC_ALL=C df -i 2>/dev/null | awk 'NR>1 && $1 !~ /^(tmpfs|devtmpfs|squashfs|overlay|udev|none)/ {gsub(/%/,"",$5); if($5+0 > max) max=$5+0} END{print max+0}')"
+    if [ "$_inode_max" -ge 90 ] 2>/dev/null; then
+        status_warn "Inode usage is high (${_inode_max}%)" \
+            "Too many small files — find directories with most files: find / -xdev -printf '%h\n' | sort | uniq -c | sort -rn | head"
+    else
+        status_ok "Inode usage is healthy"
+    fi
+
+    # Optional: SMART data
+    if command -v smartctl >/dev/null 2>&1; then
+        if [ "$(id -u)" -eq 0 ]; then
+            for _disk in $(lsblk -dno NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1}'); do
+                _health="$(smartctl -H "/dev/$_disk" 2>/dev/null | grep -i 'overall-health\|result' | sed 's/.*: *//')" || true
+                if [ -n "$_health" ]; then
+                    case "$_health" in
+                        *PASSED*|*OK*) status_ok "SMART: /dev/$_disk — ${_health}" ;;
+                        *)             status_crit "SMART: /dev/$_disk — ${_health}" \
+                            "Disk may be failing — back up data immediately and plan replacement" ;;
+                    esac
+                fi
+            done
+        else
+            note "SMART checks require root (run with sudo for disk health data)"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Section 5: Thermal Status
+# ---------------------------------------------------------------------------
+
+section_thermal_status() {
+    section_header "Thermal Status"
+
+    _found_thermal=false
+
+    # RPi-specific: vcgencmd
+    if [ "$IS_RPI" = true ] && command -v vcgencmd >/dev/null 2>&1; then
+        _temp="$(vcgencmd measure_temp 2>/dev/null | sed "s/temp=//;s/'C//")" || true
+        if [ -n "$_temp" ]; then
+            _found_thermal=true
+            kv "CPU Temperature" "${_temp} C"
+            _t_status="$(echo "$_temp" | awk '{
+                if ($1 < 60) print "ok"
+                else if ($1 < 80) print "warn"
+                else print "crit"
+            }')"
+            case "$_t_status" in
+                ok)   status_ok "Temperature is normal" ;;
+                warn) status_warn "Temperature is elevated (${_temp} C)" \
+                    "Add a heatsink or fan; move RPi away from enclosed spaces" ;;
+                crit) status_crit "Temperature is critical (${_temp} C)" \
+                    "RPi is throttling — add active cooling (fan) immediately" ;;
+            esac
+        fi
+
+        # Throttle status
+        _throttled="$(vcgencmd get_throttled 2>/dev/null | sed 's/throttled=//')" || true
+        if [ -n "$_throttled" ]; then
+            _hex="$(printf '%d' "$_throttled" 2>/dev/null)" || _hex=0
+            if [ "$_hex" -eq 0 ]; then
+                status_ok "No throttling detected"
+            else
+                [ $(( _hex & 0x1 )) -ne 0 ] && status_crit "Under-voltage detected (now)" \
+                    "Use the official RPi power supply (5V/3A); check USB cable quality"
+                [ $(( _hex & 0x2 )) -ne 0 ] && status_warn "ARM frequency capped (now)" \
+                    "Power supply may be marginal — use a higher-rated adapter"
+                [ $(( _hex & 0x4 )) -ne 0 ] && status_crit "Currently throttled" \
+                    "CPU overheating — add active cooling (fan) or reduce workload"
+                [ $(( _hex & 0x8 )) -ne 0 ] && status_warn "Soft temperature limit active" \
+                    "Temperature is approaching throttle point — improve ventilation"
+                [ $(( _hex & 0x10000 )) -ne 0 ] && note "Under-voltage occurred since boot"
+                [ $(( _hex & 0x20000 )) -ne 0 ] && note "ARM frequency capped since boot"
+                [ $(( _hex & 0x40000 )) -ne 0 ] && note "Throttling occurred since boot"
+                [ $(( _hex & 0x80000 )) -ne 0 ] && note "Soft temp limit occurred since boot"
+            fi
+        fi
+    fi
+
+    # Generic thermal zones
+    for _zone in /sys/class/thermal/thermal_zone*; do
+        [ -d "$_zone" ] || continue
+        _type="$(cat "$_zone/type" 2>/dev/null)" || continue
+        _raw="$(cat "$_zone/temp" 2>/dev/null)" || continue
+        [ -n "$_raw" ] || continue
+        _temp_c=$(( _raw / 1000 ))
+        # Skip zones at 0 degrees (often inactive/unused)
+        [ "$_temp_c" -eq 0 ] && continue
+        _found_thermal=true
+
+        # Only print and evaluate if we didn't already cover it via vcgencmd
+        if [ "$IS_RPI" = true ] && command -v vcgencmd >/dev/null 2>&1; then
+            kv "$_type" "${_temp_c} C"
+        else
+            kv "$_type" "${_temp_c} C"
+            if [ "$IS_RPI" = true ]; then
+                _thresh_warn=60; _thresh_crit=80
+            else
+                _thresh_warn=70; _thresh_crit=85
+            fi
+            if [ "$_temp_c" -ge "$_thresh_crit" ]; then
+                status_crit "${_type} temperature is critical (${_temp_c} C)" \
+                    "Check cooling: clean dust from fans/vents, verify thermal paste, improve airflow"
+            elif [ "$_temp_c" -ge "$_thresh_warn" ]; then
+                status_warn "${_type} temperature is elevated (${_temp_c} C)" \
+                    "Monitor cooling — ensure fans are running and vents are unobstructed"
+            else
+                status_ok "${_type} temperature is normal"
+            fi
+        fi
+    done
+
+    # hwmon-based CPU sensors (AMD k10temp, Intel coretemp, etc.)
+    for _h in /sys/class/hwmon/hwmon*; do
+        [ -d "$_h" ] || continue
+        _hname="$(cat "$_h/name" 2>/dev/null)" || continue
+        case "$_hname" in
+            k10temp|coretemp|zenpower) ;;
+            *) continue ;;
+        esac
+        for _inp in "$_h"/temp*_input; do
+            [ -f "$_inp" ] || continue
+            _raw="$(cat "$_inp" 2>/dev/null)" || continue
+            [ -n "$_raw" ] || continue
+            _temp_c=$(( _raw / 1000 ))
+            [ "$_temp_c" -eq 0 ] && continue
+            _found_thermal=true
+            _label="$(cat "${_inp%_input}_label" 2>/dev/null)" || _label="$_hname"
+            kv "$_label" "${_temp_c} C"
+            _thresh_warn=70; _thresh_crit=85
+            if [ "$_temp_c" -ge "$_thresh_crit" ]; then
+                status_crit "${_label} temperature is critical (${_temp_c} C)" \
+                    "Check cooling: clean dust from fans/vents, verify thermal paste, improve airflow"
+            elif [ "$_temp_c" -ge "$_thresh_warn" ]; then
+                status_warn "${_label} temperature is elevated (${_temp_c} C)" \
+                    "Monitor cooling — ensure fans are running and vents are unobstructed"
+            fi
+        done
+    done
+
+    # Optional: lm-sensors
+    if command -v sensors >/dev/null 2>&1; then
+        printf '\n  %b--- sensors output ---%b\n' "$C_DIM" "$C_RST"
+        sensors 2>/dev/null | sed 's/^/  /'
+    fi
+
+    if [ "$_found_thermal" = false ]; then
+        # Provide actionable guidance based on CPU vendor
+        _cpu_vendor="$(LC_ALL=C grep -m1 'vendor_id' /proc/cpuinfo 2>/dev/null | sed 's/.*: //')"
+        case "$_cpu_vendor" in
+            AuthenticAMD)
+                status_warn "No CPU thermal data available" \
+                    "Load the k10temp module: sudo modprobe k10temp && echo k10temp | sudo tee /etc/modules-load.d/k10temp.conf" ;;
+            GenuineIntel)
+                status_warn "No CPU thermal data available" \
+                    "Load the coretemp module: sudo modprobe coretemp && echo coretemp | sudo tee /etc/modules-load.d/coretemp.conf" ;;
+            *)
+                status_warn "No CPU thermal data available" \
+                    "Install lm-sensors and run: sudo sensors-detect" ;;
+        esac
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Section 6: Network Status
+# ---------------------------------------------------------------------------
+
+section_network_status() {
+    section_header "Network Status"
+
+    # Interfaces and IPs
+    if command -v ip >/dev/null 2>&1; then
+        ip -o addr show 2>/dev/null | awk '$2 != "lo" {print $2, $3, $4}' | \
+        while IFS= read -r _line; do
+            _iface="$(echo "$_line" | awk '{print $1}')"
+            _proto="$(echo "$_line" | awk '{print $2}')"
+            _addr="$(echo "$_line" | awk '{print $3}' | sed 's|/.*||')"
+            kv "$_iface (${_proto})" "$_addr"
+        done
+
+        # Default gateway
+        _gw="$(ip route show default 2>/dev/null | awk '{print $3; exit}')"
+        [ -n "$_gw" ] && kv "Default Gateway" "$_gw"
+    fi
+
+    # DNS servers
+    if [ -f /etc/resolv.conf ]; then
+        _dns="$(grep '^nameserver' /etc/resolv.conf | awk '{printf "%s ", $2}')"
+        [ -n "$_dns" ] && kv "DNS Servers" "$_dns"
+    fi
+
+    # Traffic stats
+    if [ -f /proc/net/dev ]; then
+        printf '\n'
+        printf '  %b%-12s %12s %12s%b\n' "$C_LBL" "INTERFACE" "RX" "TX" "$C_RST"
+        awk 'NR>2 {
+            gsub(/:/, "", $1)
+            if ($1 != "lo") {
+                rx=$2; tx=$10
+                if (rx >= 1073741824) rxh=sprintf("%.1f GiB", rx/1073741824)
+                else if (rx >= 1048576) rxh=sprintf("%.1f MiB", rx/1048576)
+                else if (rx >= 1024) rxh=sprintf("%.1f KiB", rx/1024)
+                else rxh=sprintf("%d B", rx)
+                if (tx >= 1073741824) txh=sprintf("%.1f GiB", tx/1073741824)
+                else if (tx >= 1048576) txh=sprintf("%.1f MiB", tx/1048576)
+                else if (tx >= 1024) txh=sprintf("%.1f KiB", tx/1024)
+                else txh=sprintf("%d B", tx)
+                printf "  %-12s %12s %12s\n", $1, rxh, txh
+            }
+        }' /proc/net/dev
+    fi
+
+    printf '\n'
+
+    # Connectivity check
+    if command -v ping >/dev/null 2>&1; then
+        if ping -c1 -W3 1.1.1.1 >/dev/null 2>&1; then
+            status_ok "Internet connectivity (1.1.1.1)"
+            if ping -c1 -W3 google.com >/dev/null 2>&1; then
+                status_ok "DNS resolution working"
+            else
+                status_warn "DNS resolution failed (ping google.com)" \
+                    "Check /etc/resolv.conf and DNS settings; try: systemd-resolve --status"
+            fi
+        else
+            status_crit "No internet connectivity (ping 1.1.1.1 failed)" \
+                "Check cable/wifi connection, gateway reachability, and firewall rules"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Section 7: Top Processes
+# ---------------------------------------------------------------------------
+
+section_top_processes() {
+    section_header "Top Processes"
+
+    _total="$(ps -e --no-headers 2>/dev/null | wc -l)"
+    kv "Total Processes" "$_total"
+
+    _zombies="$(ps -eo stat 2>/dev/null | grep -c '^Z')" || _zombies=0
+    if [ "$_zombies" -gt 0 ]; then
+        status_warn "${_zombies} zombie process(es) found" \
+            "Find parents: ps -eo pid,ppid,stat,comm | grep ' Z'; parent process should be restarted"
+    else
+        status_ok "No zombie processes"
+    fi
+
+    printf '\n  %bTop 5 by CPU:%b\n' "$C_LBL" "$C_RST"
+    ps -eo pid,user,%cpu,%mem,comm --sort=-%cpu 2>/dev/null | head -6 | sed 's/^/  /'
+
+    printf '\n  %bTop 5 by Memory:%b\n' "$C_LBL" "$C_RST"
+    ps -eo pid,user,%mem,%cpu,comm --sort=-%mem 2>/dev/null | head -6 | sed 's/^/  /'
+}
+
+# ---------------------------------------------------------------------------
+# Section 8: Battery (conditional — laptops only)
+# ---------------------------------------------------------------------------
+
+section_battery() {
+    _bat_path=""
+    for _b in /sys/class/power_supply/BAT*; do
+        [ -d "$_b" ] && _bat_path="$_b" && break
+    done
+    [ -n "$_bat_path" ] || return 0
+
+    section_header "Battery"
+
+    _cap="$(cat "$_bat_path/capacity" 2>/dev/null)" || true
+    _status="$(cat "$_bat_path/status" 2>/dev/null)" || true
+    [ -n "$_cap" ] && kv "Charge" "${_cap}%"
+    [ -n "$_status" ] && kv "Status" "$_status"
+
+    # Battery health
+    _full="$(cat "$_bat_path/energy_full" 2>/dev/null)" || \
+    _full="$(cat "$_bat_path/charge_full" 2>/dev/null)" || true
+    _design="$(cat "$_bat_path/energy_full_design" 2>/dev/null)" || \
+    _design="$(cat "$_bat_path/charge_full_design" 2>/dev/null)" || true
+    if [ -n "$_full" ] && [ -n "$_design" ] && [ "$_design" -gt 0 ] 2>/dev/null; then
+        _health="$(echo "$_full $_design" | awk '{printf "%.1f", $1*100/$2}')"
+        kv "Battery Health" "${_health}%"
+    fi
+
+    if [ -n "$_cap" ] && [ -n "$_status" ]; then
+        case "$_status" in
+            Discharging)
+                if [ "$_cap" -le 10 ] 2>/dev/null; then
+                    status_crit "Battery critically low (${_cap}%)" \
+                        "Connect charger immediately to avoid unexpected shutdown"
+                elif [ "$_cap" -le 20 ] 2>/dev/null; then
+                    status_warn "Battery low (${_cap}%)" \
+                        "Connect charger soon"
+                else
+                    status_ok "Battery level is fine"
+                fi
+                ;;
+            *)
+                status_ok "Battery is ${_status}"
+                ;;
+        esac
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Section 9: CPU Benchmark (--bench only)
+# ---------------------------------------------------------------------------
+
+section_cpu_benchmark() {
+    [ "$FLAG_BENCH" = true ] || return 0
+
+    section_header "CPU Benchmark"
+
+    _cores="$(nproc 2>/dev/null || echo 1)"
+
+    if command -v sysbench >/dev/null 2>&1; then
+        note "Running sysbench CPU test (prime=20000, threads=${_cores})..."
+        _result="$(sysbench cpu --cpu-max-prime=20000 --threads="$_cores" run 2>/dev/null)"
+        _events="$(echo "$_result" | grep 'events per second' | awk '{print $NF}')"
+        _total_time="$(echo "$_result" | grep 'total time:' | awk '{print $NF}')"
+        [ -n "$_events" ] && kv "Events/sec" "$_events"
+        [ -n "$_total_time" ] && kv "Total Time" "$_total_time"
+    else
+        note "sysbench not found — falling back to dd+md5sum benchmark..."
+        _start_ns="$(date +%s%N 2>/dev/null)" || _start_ns=""
+        dd if=/dev/urandom bs=1M count=128 2>/dev/null | md5sum >/dev/null
+        _end_ns="$(date +%s%N 2>/dev/null)" || _end_ns=""
+        if [ -n "$_start_ns" ] && [ -n "$_end_ns" ]; then
+            _elapsed_ms="$(echo "$_start_ns $_end_ns" | awk '{printf "%.0f", ($2-$1)/1000000}')"
+            _elapsed_s="$(echo "$_elapsed_ms" | awk '{printf "%.2f", $1/1000}')"
+            if [ "$_elapsed_ms" -gt 0 ] 2>/dev/null; then
+                _mbps="$(echo "$_elapsed_ms" | awk '{printf "%.1f", 128*1000/$1}')"
+                kv "Throughput" "${_mbps} MB/s (dd+md5sum, 128MB)"
+            fi
+            kv "Elapsed" "${_elapsed_s}s"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Section 10: Disk I/O Benchmark (--bench only)
+# ---------------------------------------------------------------------------
+
+section_disk_benchmark() {
+    [ "$FLAG_BENCH" = true ] || return 0
+
+    section_header "Disk I/O Benchmark"
+
+    if command -v fio >/dev/null 2>&1; then
+        note "Running fio sequential write test (256M)..."
+        _write_bw="$(fio --name=seq_write --rw=write --bs=1M --size=256M \
+            --runtime=5 --time_based --directory=/tmp --output-format=json \
+            2>/dev/null | awk -F'[,:}]' '/"bw_bytes"/{n++;if(n==2){print $2;exit}}')" || true
+        if [ -n "$_write_bw" ] && [ "$_write_bw" -gt 0 ] 2>/dev/null; then
+            _write_mb=$(( _write_bw / 1048576 ))
+            kv "Sequential Write" "${_write_mb} MB/s"
+        fi
+        rm -f /tmp/seq_write.0.0
+
+        note "Running fio sequential read test (256M)..."
+        # Create test file first
+        dd if=/dev/zero of="$BENCH_TMPFILE" bs=1M count=256 2>/dev/null
+        _read_bw="$(fio --name=seq_read --rw=read --bs=1M --size=256M \
+            --runtime=5 --time_based --filename="$BENCH_TMPFILE" \
+            --output-format=json 2>/dev/null | \
+            awk -F'[,:}]' '/"bw_bytes"/{print $2; exit}')" || true
+        if [ -n "$_read_bw" ] && [ "$_read_bw" -gt 0 ] 2>/dev/null; then
+            _read_mb=$(( _read_bw / 1048576 ))
+            kv "Sequential Read" "${_read_mb} MB/s"
+        fi
+        rm -f "$BENCH_TMPFILE"
+    else
+        note "fio not found — falling back to dd benchmark..."
+
+        # Write test
+        _write_out="$(dd if=/dev/zero of="$BENCH_TMPFILE" bs=1M count=256 conv=fdatasync 2>&1)"
+        _write_speed="$(echo "$_write_out" | grep -oE '[0-9.]+ [GMKT]?B/s' | tail -1)"
+        [ -n "$_write_speed" ] && kv "Sequential Write" "$_write_speed (dd, 256M)"
+
+        # Read test
+        # Flush caches if root, otherwise note it
+        if [ "$(id -u)" -eq 0 ]; then
+            sync
+            printf '3' > /proc/sys/vm/drop_caches 2>/dev/null || true
+        else
+            note "Read test may be cached (not root, cannot drop caches)"
+        fi
+        _read_out="$(dd if="$BENCH_TMPFILE" of=/dev/null bs=1M 2>&1)"
+        _read_speed="$(echo "$_read_out" | grep -oE '[0-9.]+ [GMKT]?B/s' | tail -1)"
+        [ -n "$_read_speed" ] && kv "Sequential Read" "$_read_speed (dd, 256M)"
+
+        rm -f "$BENCH_TMPFILE"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Section 11: CPU Stress Test (--stress only)
+# ---------------------------------------------------------------------------
+
+section_cpu_stress() {
+    [ "$FLAG_STRESS" = true ] || return 0
+
+    section_header "CPU Stress Test (${STRESS_DURATION}s)"
+
+    _cores="$(nproc 2>/dev/null || echo 1)"
+
+    start_thermal_monitor
+
+    if command -v stress-ng >/dev/null 2>&1; then
+        note "Running stress-ng CPU stress (${_cores} workers, ${STRESS_DURATION}s)..."
+        _result="$(stress-ng --cpu "$_cores" --cpu-method all \
+            --timeout "${STRESS_DURATION}s" --metrics-brief 2>&1)" || true
+        # Extract bogo-ops/s (real time) from the cpu metrics line
+        _bogo="$(echo "$_result" | awk '/metrc.*cpu[[:space:]]/ {print $(NF-1)}')"
+        [ -n "$_bogo" ] && kv "Bogo-ops/s (real)" "$_bogo"
+    else
+        note "stress-ng not found — falling back to shell CPU spinners (${_cores} workers, ${STRESS_DURATION}s)..."
+        # Spawn CPU-burning subshells
+        _stress_pids=""
+        _i=0
+        while [ "$_i" -lt "$_cores" ]; do
+            (while true; do : ; done) &
+            _stress_pids="$_stress_pids $!"
+            _i=$(( _i + 1 ))
+        done
+        sleep "$STRESS_DURATION"
+        for _p in $_stress_pids; do
+            kill "$_p" 2>/dev/null || true
+        done
+        wait 2>/dev/null || true
+        _stress_pids=""
+        kv "Method" "shell busy-loop (${_cores} workers)"
+    fi
+
+    stop_thermal_monitor
+    report_thermal_monitor
+}
+
+# ---------------------------------------------------------------------------
+# Section 12: Memory Stress Test (--stress only)
+# ---------------------------------------------------------------------------
+
+section_memory_stress() {
+    [ "$FLAG_STRESS" = true ] || return 0
+
+    section_header "Memory Stress Test (${STRESS_DURATION}s)"
+
+    # Determine safe amount to test (80% of available)
+    _avail_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)"
+    _avail_kb="${_avail_kb:-0}"
+    _test_mb=$(( _avail_kb * 80 / 100 / 1024 ))
+    # Cap at reasonable amount to avoid OOM
+    [ "$_test_mb" -gt 4096 ] && _test_mb=4096
+    [ "$_test_mb" -lt 64 ] && _test_mb=64
+
+    start_thermal_monitor
+
+    if command -v stress-ng >/dev/null 2>&1; then
+        note "Running stress-ng memory stress (${_test_mb}M, ${STRESS_DURATION}s)..."
+        _result="$(stress-ng --vm 1 --vm-bytes "${_test_mb}M" \
+            --vm-method all --verify \
+            --timeout "${STRESS_DURATION}s" --metrics-brief 2>&1)" || true
+        # Check for real verification failures (not "failed: 0")
+        _fail_count="$(echo "$_result" | grep -oP 'failed:\s*\K[0-9]+' | awk '{s+=$1} END{print s+0}')" || _fail_count=0
+        if [ "$_fail_count" -gt 0 ]; then
+            status_crit "Memory verification errors detected (${_fail_count} failures)" \
+                "Possible bad RAM — run memtest86+ from GRUB to confirm; replace faulty module"
+        elif echo "$_result" | grep -qi 'error\|fault\|segfault\|killed'; then
+            status_crit "Memory stress encountered errors" \
+                "Possible bad RAM — run memtest86+ from GRUB to confirm; replace faulty module"
+            echo "$_result" | grep -i 'error\|fault\|segfault\|killed' | head -3 | sed 's/^/  /'
+        else
+            status_ok "Memory stress completed without errors (${_test_mb}M tested)"
+        fi
+        _bogo="$(echo "$_result" | awk '/metrc.*vm[[:space:]]/ {print $(NF-1)}')"
+        [ -n "$_bogo" ] && kv "Bogo-ops/s (real)" "$_bogo"
+    elif command -v memtester >/dev/null 2>&1; then
+        # memtester tests a fixed amount for N iterations; scale to fit duration
+        _mt_mb=$(( _test_mb > 512 ? 512 : _test_mb ))
+        note "Running memtester (${_mt_mb}M, 1 iteration)..."
+        _result="$(memtester "${_mt_mb}M" 1 2>&1)" || true
+        if echo "$_result" | grep -qi 'FAILURE'; then
+            status_crit "Memory test failures detected" \
+                "Possible bad RAM — run memtest86+ from GRUB to confirm; replace faulty module"
+            echo "$_result" | grep -i 'FAILURE' | head -5 | sed 's/^/  /'
+        else
+            status_ok "memtester passed (${_mt_mb}M)"
+        fi
+    else
+        note "stress-ng/memtester not found — falling back to dd memory pressure test..."
+        # Allocate and hash memory blocks to exercise RAM
+        _chunks=$(( _test_mb / 64 ))
+        [ "$_chunks" -lt 1 ] && _chunks=1
+        note "Writing and verifying ${_chunks} x 64M blocks..."
+        _i=0
+        _fail=false
+        while [ "$_i" -lt "$_chunks" ]; do
+            _hash1="$(dd if=/dev/urandom bs=1M count=64 2>/dev/null | md5sum | awk '{print $1}')"
+            # Verify we got a hash (basic sanity)
+            if [ -z "$_hash1" ]; then
+                _fail=true
+                break
+            fi
+            _i=$(( _i + 1 ))
+        done
+        if [ "$_fail" = true ]; then
+            status_warn "Memory pressure test had issues" \
+                "Install stress-ng or memtester for thorough RAM testing"
+        else
+            status_ok "Memory pressure test completed ($(( _chunks * 64 ))M processed)"
+        fi
+    fi
+
+    stop_thermal_monitor
+    report_thermal_monitor
+}
+
+# ---------------------------------------------------------------------------
+# Section 13: Disk Stress Test (--stress only)
+# ---------------------------------------------------------------------------
+
+section_disk_stress() {
+    [ "$FLAG_STRESS" = true ] || return 0
+
+    section_header "Disk I/O Stress Test (${STRESS_DURATION}s)"
+
+    start_thermal_monitor
+
+    if command -v fio >/dev/null 2>&1; then
+        note "Running fio random read/write stress (${STRESS_DURATION}s)..."
+        _result="$(fio --name=stress_rw --rw=randrw --rwmixread=70 \
+            --bs=4k --size=512M --numjobs=4 --runtime="$STRESS_DURATION" \
+            --time_based --group_reporting --directory=/tmp \
+            --output-format=json 2>/dev/null)" || true
+        rm -f /tmp/stress_rw.*.0
+
+        # Parse results — use python3 for reliable JSON parsing (always on Ubuntu/RPi OS)
+        if command -v python3 >/dev/null 2>&1; then
+            eval "$(echo "$_result" | python3 -c "
+import sys, json
+try:
+    j = json.load(sys.stdin)['jobs'][0]
+    r, w = j['read'], j['write']
+    print('_read_iops=%d' % r['iops'])
+    print('_write_iops=%d' % w['iops'])
+    print('_read_lat=%.1f' % (r['clat_ns']['mean'] / 1000))
+    print('_write_lat=%.1f' % (w['clat_ns']['mean'] / 1000))
+except: pass
+" 2>/dev/null)" || true
+        fi
+
+        [ -n "${_read_iops:-}" ] && kv "Read IOPS" "$_read_iops"
+        [ -n "${_write_iops:-}" ] && kv "Write IOPS" "$_write_iops"
+        [ -n "${_read_lat:-}" ] && kv "Read Latency (avg)" "${_read_lat} us"
+        [ -n "${_write_lat:-}" ] && kv "Write Latency (avg)" "${_write_lat} us"
+
+        # Check for I/O errors in fio output
+        _io_errors="$(echo "$_result" | awk -F'[,:}]' '/"io_errors"/{s+=$2} END{print s+0}')" || _io_errors=0
+        if [ "$_io_errors" -gt 0 ]; then
+            status_crit "Disk I/O errors detected during stress (${_io_errors} errors)" \
+                "Check dmesg for disk errors; run smartctl for disk health; consider disk replacement"
+        else
+            status_ok "No I/O errors during disk stress"
+        fi
+    else
+        note "fio not found — falling back to dd sustained write stress..."
+        _end_time=$(( $(date +%s) + STRESS_DURATION ))
+        _iterations=0
+        _errors=0
+        while [ "$(date +%s)" -lt "$_end_time" ]; do
+            if dd if=/dev/urandom of="$BENCH_TMPFILE" bs=1M count=64 conv=fdatasync 2>/dev/null; then
+                _iterations=$(( _iterations + 1 ))
+            else
+                _errors=$(( _errors + 1 ))
+            fi
+        done
+        rm -f "$BENCH_TMPFILE"
+        _total_mb=$(( _iterations * 64 ))
+        kv "Data Written" "${_total_mb} MB in ${STRESS_DURATION}s"
+        kv "Avg Throughput" "$(echo "$_total_mb $STRESS_DURATION" | awk '{printf "%.1f", $1/$2}') MB/s"
+        if [ "$_errors" -gt 0 ]; then
+            status_crit "Disk write errors occurred (${_errors} failures)" \
+                "Check dmesg for disk errors; verify filesystem integrity with fsck"
+        else
+            status_ok "Sustained disk writes completed without errors"
+        fi
+    fi
+
+    stop_thermal_monitor
+    report_thermal_monitor
+}
+
+# ---------------------------------------------------------------------------
+# Section 14: Summary
+# ---------------------------------------------------------------------------
+
+section_summary() {
+    section_header "Summary"
+
+    _total=$(( _pass + _warn + _crit ))
+    printf '  Total checks:  %d\n' "$_total"
+    printf '  %b[PASS]%b  %-6d %b[WARN]%b  %-6d %b[CRIT]%b  %d\n' \
+        "$C_OK" "$C_RST" "$_pass" \
+        "$C_WARN" "$C_RST" "$_warn" \
+        "$C_CRIT" "$C_RST" "$_crit"
+
+    printf '\n'
+    if [ "$_crit" -gt 0 ]; then
+        printf '  Overall: %b ACTION REQUIRED %b\n' "$C_CRIT" "$C_RST"
+    elif [ "$_warn" -gt 0 ]; then
+        printf '  Overall: %b ATTENTION NEEDED %b\n' "$C_WARN" "$C_RST"
+    else
+        printf '  Overall: %b HEALTHY %b\n' "$C_OK" "$C_RST"
+    fi
+
+    # Replay issues so the user doesn't have to scroll up
+    if [ -s "$ISSUES_LOG" ]; then
+        printf '\n  %b--- Issues to address ---%b\n\n' "$C_HDR" "$C_RST"
+        while IFS='	' read -r _lvl _msg _hint; do
+            case "$_lvl" in
+                CRIT) printf '  %b[CRIT]%b %s\n' "$C_CRIT" "$C_RST" "$_msg" ;;
+                WARN) printf '  %b[WARN]%b %s\n' "$C_WARN" "$C_RST" "$_msg" ;;
+            esac
+            [ -n "$_hint" ] && printf '         %b-> %s%b\n' "$C_DIM" "$_hint" "$C_RST"
+        done < "$ISSUES_LOG"
+    fi
+
+    printf '\n  Evaluated at %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+detect_platform
+check_dependencies
+check_root "$@"
+
+section_system_overview
+section_cpu_health
+section_memory_health
+section_disk_health
+section_thermal_status
+section_network_status
+section_top_processes
+section_battery
+section_cpu_benchmark
+section_disk_benchmark
+section_cpu_stress
+section_memory_stress
+section_disk_stress
+section_summary

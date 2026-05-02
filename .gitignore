@@ -1,0 +1,8 @@
+*.log
+
+# Shell local overrides (machine-specific)
+shell/local.d/*.sh
+!shell/local.d/.gitkeep
+
+# Default Python env (managed by shell/topics/python.sh)
+shell/python/.venv/
