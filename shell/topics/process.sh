@@ -1,3 +1,9 @@
 # process.sh - aliases & functions for managing processes
 
-alias psids="ps -eo pid,pgid,sid,comm"
+psids() {
+  if [ $# -eq 0 ]; then
+    ps -eo pid,pgid,sid,comm
+  else
+    ps -eo pid,pgid,sid,comm | awk -v pat="$*" 'NR==1 || $0 ~ pat'
+  fi
+}
