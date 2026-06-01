@@ -178,5 +178,7 @@ else
   printf 'Warning: %s not executable, skipping default terminal setup\n' "$ghostty_bin" >&2
 fi
 
+infocmp xterm-ghostty | sudo tic -x /dev/stdin
+
 ok "Ghostty $GHOSTTY_VERSION installed at $ghostty_bin"
 printf '   Launch from your app menu (search "Ghostty") or run: ghostty\n'
