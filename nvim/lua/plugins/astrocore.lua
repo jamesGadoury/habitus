@@ -54,6 +54,24 @@ return {
         -- This can be found in the `lua/lazy_setup.lua` file
       },
     },
+    -- Autocommands can be configured through AstroCore as well.
+    autocmds = {
+      -- The built-in XML indent script (indent/xml.vim) lists <Return> in
+      -- 'indentkeys', so it re-indents the new line on every Enter. That
+      -- forces attribute-continuation lines deeper automatically. Dropping
+      -- <Return> keeps tag-aware snapping (on </, >, etc.) and on-demand `==`,
+      -- but lets newlined attributes stay where you put them.
+      xml_indent = {
+        {
+          event = "FileType",
+          pattern = { "xml", "html", "svg", "xsd", "xslt" },
+          desc = "Stop auto-reindent on <Return> for XML-family filetypes",
+          -- The entry is "*<Return>" (the "*" prefix means "reindent, then
+          -- insert the key"), so remove both forms to be safe across filetypes.
+          callback = function() vim.opt_local.indentkeys:remove { "*<Return>", "<Return>" } end,
+        },
+      },
+    },
     -- Mappings can be configured through AstroCore as well.
     -- NOTE: keycodes follow the casing in the vimdocs. For example, `<Leader>` must be capitalized
     mappings = {
