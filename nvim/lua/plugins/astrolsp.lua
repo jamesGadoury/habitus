@@ -30,6 +30,8 @@ return {
         -- disable lua_ls formatting capability if you want to use StyLua to format your lua code
         -- "lua_ls",
         "basedpyright", -- let ruff handle Python formatting
+        "vtsls", -- let biome handle TS/JS formatting
+        "ts_ls", -- covers repos where the base pack falls back to ts_ls
       },
       timeout_ms = 1000, -- default format timeout
       -- filter = function(client) -- fully override the default formatting function
@@ -85,6 +87,9 @@ return {
           -- Defer hover to basedpyright (richer type info)
           client.server_capabilities.hoverProvider = false
         end,
+      },
+      biome = {
+        root_dir = require("lspconfig.util").root_pattern("biome.json", "biome.jsonc"),
       },
     },
     -- customize how language servers are attached

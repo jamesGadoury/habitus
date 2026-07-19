@@ -7,6 +7,7 @@ local function ensure_installed()
     "basedpyright",
     "ruff",
     "clangd",
+    "biome",
 
     -- install formatters
     "stylua",
