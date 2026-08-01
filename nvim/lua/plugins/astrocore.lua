@@ -71,6 +71,23 @@ return {
           callback = function() vim.opt_local.indentkeys:remove { "*<Return>", "<Return>" } end,
         },
       },
+      -- 'wrap' is off globally (see options.opt above), which leaves prose
+      -- running off the right edge. Turn it back on for prose filetypes only.
+      -- This is display-only soft wrap: no <NL> is inserted into the buffer.
+      prose_wrap = {
+        {
+          event = "FileType",
+          pattern = { "markdown", "markdown_inline", "mdx", "text", "gitcommit" },
+          desc = "Soft-wrap prose at the window edge",
+          callback = function()
+            vim.opt_local.wrap = true
+            vim.opt_local.linebreak = true -- break at 'breakat' chars, not mid-word
+            vim.opt_local.breakindent = true -- keep continuation lines under the list/quote indent
+            -- NOTE: no j/k remap needed — AstroNvim already maps them to a
+            -- count-aware gj/gk globally, which handles wrapped lines.
+          end,
+        },
+      },
     },
     -- Mappings can be configured through AstroCore as well.
     -- NOTE: keycodes follow the casing in the vimdocs. For example, `<Leader>` must be capitalized
