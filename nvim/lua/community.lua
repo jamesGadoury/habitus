@@ -11,4 +11,7 @@ return {
   { import = "astrocommunity.pack.cpp" },
   { import = "astrocommunity.pack.cmake" },
   { import = "astrocommunity.pack.typescript-all-in-one" },
+  -- rustaceanvim + crates.nvim + the toml pack (taplo). Deliberately does NOT
+  -- install rust-analyzer via Mason — rustup owns it (see plugins/rust.lua).
+  { import = "astrocommunity.pack.rust" },
 }
