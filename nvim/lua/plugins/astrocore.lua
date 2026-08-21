@@ -3,6 +3,12 @@
 -- NOTE: We highly recommend setting up the Lua Language Server (`:LspInstall lua_ls`)
 --       as this provides autocomplete and documentation while editing
 
+-- Most recent *listed* buffer we were sitting in. Tracked separately from
+-- `nvim_get_current_buf()` because pickers (snacks) are floating scratch
+-- buffers: when they open a file the "current" buffer is the picker itself,
+-- which is unlisted and therefore not a meaningful anchor.
+local last_listed_buf
+
 ---@type LazySpec
 return {
   "AstroNvim/astrocore",
@@ -69,6 +75,48 @@ return {
           -- The entry is "*<Return>" (the "*" prefix means "reindent, then
           -- insert the key"), so remove both forms to be safe across filetypes.
           callback = function() vim.opt_local.indentkeys:remove { "*<Return>", "<Return>" } end,
+        },
+      },
+      -- New buffers are appended to the end of the tabline's buffer list by
+      -- AstroNvim's own `bufferline` autocmd (a plain `table.insert` into
+      -- `vim.t.bufs`). Move them to sit directly after the buffer that was
+      -- current when they were created, so a file opened from the picker lands
+      -- next to where you are instead of at the far right.
+      buffer_open_adjacent = {
+        {
+          event = "BufEnter",
+          desc = "Remember the last listed buffer to use as an insertion anchor",
+          callback = function(args)
+            if vim.bo[args.buf].buflisted then last_listed_buf = args.buf end
+          end,
+        },
+        {
+          event = "BufAdd",
+          desc = "Place newly added buffers right after the current one in the tabline",
+          callback = function(args)
+            local bufnr, anchor = args.buf, last_listed_buf
+            if not anchor or bufnr == anchor then return end
+            -- Deferred: AstroNvim's BufAdd handler is what appends to
+            -- `vim.t.bufs`, and astrocore registers autocmd groups by iterating
+            -- its opts with `pairs()`, so we can't rely on running after it
+            -- synchronously. Scheduling puts us after every BufAdd handler.
+            vim.schedule(function()
+              local bufs = vim.t.bufs
+              if not bufs then return end
+              local from, to
+              for i, buf in ipairs(bufs) do
+                if buf == bufnr then from = i end
+                if buf == anchor then to = i end
+              end
+              if not from or not to or from == to + 1 then return end
+              table.remove(bufs, from)
+              if from < to then to = to - 1 end
+              table.insert(bufs, to + 1, bufnr)
+              vim.t.bufs = bufs
+              require("astrocore").event "BufsUpdated"
+              vim.cmd.redrawtabline()
+            end)
+          end,
         },
       },
       -- 'wrap' is off globally (see options.opt above), which leaves prose
