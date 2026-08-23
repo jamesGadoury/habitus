@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+# Fetch the browser-side libraries used by the markdown preview page into
+# nvim/assets/vendor/, verifying each against a recorded SHA-256.
+#
+# Why this exists: selimacerbas/markdown-preview.nvim's stock page pulls 17
+# subresources from jsdelivr and unpkg at *floating* version ranges (mermaid@11,
+# markdown-it@14, ...), with no SRI and no CSP -- so every future release of
+# those packages is inside the trust boundary of a page that renders local files
+# and holds the preview session token. nvim/assets/index.html shadows that page
+# via runtimepath and references only ./vendor, so nothing is fetched at preview
+# time. This script is how ./vendor gets populated and how versions get bumped.
+#
+# Usage:
+#   fetch-md-preview-vendor            download and verify against the manifest
+#   fetch-md-preview-vendor --update   re-download and rewrite the manifest hashes
+#
+# Bumping a version: edit the URL in manifest.txt, run with --update, review the
+# diff (both the hash and the file), commit.
+
+readonly MANIFEST_REL="nvim/assets/vendor/manifest.txt"
+
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  RED=$(tput setaf 1)
+  YLW=$(tput setaf 3)
+  GRN=$(tput setaf 2)
+  RST=$(tput sgr0)
+else
+  RED="" YLW="" GRN="" RST=""
+fi
+readonly RED YLW GRN RST
+
+die() {
+  printf '%serror:%s %s\n' "$RED" "$RST" "$1" >&2
+  exit 1
+}
+warn() { printf '%swarn:%s %s\n' "$YLW" "$RST" "$1" >&2; }
+ok() { printf '  %sok%s   %s\n' "$GRN" "$RST" "$1"; }
+
+# Resolve the repo root from this script's real path, so it works both from the
+# repo and through the ~/.local/bin symlink that install.sh creates.
+repo_root() {
+  local self
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+  printf '%s\n' "$(cd "$(dirname "$self")/../.." && pwd)"
+}
+
+sha256_of() {
+  local out
+  out=$(sha256sum "$1")
+  printf '%s\n' "${out%% *}"
+}
+
+main() {
+  local update=0
+  case "${1:-}" in
+  --update) update=1 ;;
+  "") ;;
+  *) die "unknown argument: $1 (expected --update or nothing)" ;;
+  esac
+
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+  command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
+
+  local root manifest vendor_dir
+  root=$(repo_root)
+  manifest="$root/$MANIFEST_REL"
+  vendor_dir=$(dirname "$manifest")
+  [[ -f "$manifest" ]] || die "manifest not found: $manifest"
+
+  local tmp
+  tmp=$(mktemp -d)
+  # shellcheck disable=SC2064  # expand tmp now, not at trap time
+  trap "rm -rf '$tmp'" EXIT
+
+  local rewritten="$tmp/manifest.new"
+  : >"$rewritten"
+
+  local line want path url dest got fetched=0 skipped=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Preserve comments and blank lines verbatim when rewriting.
+    if [[ -z "$line" || "$line" == \#* ]]; then
+      printf '%s\n' "$line" >>"$rewritten"
+      continue
+    fi
+
+    # Fields are whitespace-separated; the global IFS excludes spaces on
+    # purpose, so split explicitly here.
+    IFS=$' \t' read -r want path url <<<"$line"
+    [[ -n "$want" && -n "$path" && -n "$url" ]] || die "malformed manifest line: $line"
+
+    dest="$vendor_dir/$path"
+    mkdir -p "$(dirname "$dest")"
+
+    # Already correct on disk: nothing to do, and nothing to re-download.
+    if [[ $update -eq 0 && -f "$dest" ]] && [[ "$(sha256_of "$dest")" == "$want" ]]; then
+      skipped=$((skipped + 1))
+      printf '%s\n' "$line" >>"$rewritten"
+      continue
+    fi
+
+    curl -fsSL --retry 3 --retry-delay 1 "$url" -o "$tmp/dl" ||
+      die "download failed: $url"
+    got=$(sha256_of "$tmp/dl")
+
+    if [[ $update -eq 0 && "$got" != "$want" ]]; then
+      die "checksum mismatch for $path
+  expected $want
+  got      $got
+  url      $url
+If the upstream release legitimately changed, re-run with --update and review the diff."
+    fi
+
+    mv "$tmp/dl" "$dest"
+    fetched=$((fetched + 1))
+    ok "$path"
+    printf '%s  %s  %s\n' "$got" "$path" "$url" >>"$rewritten"
+  done <"$manifest"
+
+  if [[ $update -eq 1 ]]; then
+    mv "$rewritten" "$manifest"
+    warn "manifest rewritten -- review 'git diff $MANIFEST_REL' before committing"
+  fi
+
+  printf 'vendor: %d fetched, %d already current\n' "$fetched" "$skipped"
+}
+
+main "$@"
