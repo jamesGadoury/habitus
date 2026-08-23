@@ -14,7 +14,11 @@ return {
     ensure_installed = {
       "lua",
       "vim",
-      -- highlights ```mermaid fences; markdown-preview.nvim renders them
+      -- Highlights the body of ```mermaid fences. Not load-bearing for
+      -- rendering -- the preview locates fences by info string (it only needs
+      -- `markdown`, and falls back to a regex scan) and mermaid is drawn in
+      -- the browser. Kept because the raw fence is what you look at while
+      -- writing, now that nothing renders it in the buffer.
       "mermaid",
       -- listed so they install serially; see sync_install above
       "go",

@@ -1,0 +1,364 @@
+/* Catppuccin theme for the markdown preview page.
+ *
+ * Wired up by `custom_css` in nvim/lua/plugins/markdown-preview.lua. The plugin
+ * reads this file and inlines it verbatim into a <style> block just before
+ * </head>, i.e. AFTER its own bundled styles -- so the plugin's ~32 CSS custom
+ * properties are the intended API and most of this file is a palette remap
+ * rather than a selector fight. Where a rule is not reachable through a
+ * variable, mirror the plugin's own selector shape (`#content h2`, not `h2`)
+ * and let source order do the work.
+ *
+ * CASCADE NOTE. The plugin defines dark values on `:root` and light values on
+ * `[data-theme="light"]`. Those are equal specificity (0,1,0), so source order
+ * decides -- which means a bare `:root` block here would win in BOTH modes and
+ * paint dark colours over light mode. Both blocks below are therefore qualified
+ * as `:root[data-theme="..."]`: each applies only in its own mode, and neither
+ * can leak into the other. `data-theme` is substituted server-side, so it is
+ * set from the very first paint, not just after JS runs.
+ *
+ * WORKFLOW NOTE. This file is inlined when the preview *starts*, not on
+ * refresh. To see an edit: <Leader>Ms then <Leader>Mp. <Leader>Mr will not
+ * pick it up.
+ */
+
+/* ── Shared tokens (mode-independent) ───────────────────────────────────── */
+:root {
+  /* Ubuntu Sans is the best-looking sans actually installed here; Inter is
+   * listed first so it is picked up automatically if it is ever added. */
+  --mdp-font-sans: "Inter", "Ubuntu Sans", "Noto Sans", system-ui, -apple-system,
+    "Segoe UI", Helvetica, Arial, sans-serif;
+  /* Same face ghostty renders the terminal with, so fenced code in the preview
+   * matches code in the editor glyph for glyph. */
+  --mdp-font-mono: "FiraCode Nerd Font Mono", "FiraCode Nerd Font", ui-monospace,
+    "Ubuntu Mono", "DejaVu Sans Mono", monospace;
+  /* Measure. Upstream ships a flat 900px, which stops tracking the font size the
+   * moment either changes; a ch-based cap keeps the line length honest. */
+  --mdp-measure: 78ch;
+  --mdp-radius: 10px;
+}
+
+/* ── Catppuccin Mocha ───────────────────────────────────────────────────── */
+:root[data-theme="dark"] {
+  --ctp-base: #1e1e2e;
+  --ctp-mantle: #181825;
+  --ctp-crust: #11111b;
+  --ctp-surface0: #313244;
+  --ctp-surface1: #45475a;
+  --ctp-surface2: #585b70;
+  --ctp-overlay0: #6c7086;
+  --ctp-overlay1: #7f849c;
+  --ctp-subtext0: #a6adc8;
+  --ctp-subtext1: #bac2de;
+  --ctp-text: #cdd6f4;
+  --ctp-mauve: #cba6f7;
+  --ctp-blue: #89b4fa;
+  --ctp-sapphire: #74c7ec;
+  --ctp-sky: #89dceb;
+  --ctp-teal: #94e2d5;
+  --ctp-green: #a6e3a1;
+  --ctp-yellow: #f9e2af;
+  --ctp-peach: #fab387;
+  --ctp-maroon: #eba0ac;
+  --ctp-red: #f38ba8;
+  --ctp-pink: #f5c2e7;
+  --ctp-lavender: #b4befe;
+
+  --bg: var(--ctp-base);
+  --panel: var(--ctp-mantle);
+  --stroke: var(--ctp-surface0);
+  --fg: var(--ctp-text);
+  --fg-muted: var(--ctp-subtext0);
+  --link: var(--ctp-blue);
+  --code-bg: var(--ctp-mantle);
+  --blockquote-border: var(--ctp-surface2);
+  --table-border: var(--ctp-surface0);
+  /* Zebra striping fights the hairline rules below; keep rows flat. */
+  --table-row-alt: transparent;
+  --err-bg: rgba(243, 139, 168, 0.08);
+  --err-border: var(--ctp-red);
+  --err-fg: var(--ctp-red);
+  --scroll-track: transparent;
+  --scroll-thumb: var(--ctp-surface1);
+  --scroll-thumb-hover: var(--ctp-surface2);
+  --accent: var(--ctp-mauve);
+  --badge-bg: var(--ctp-surface0);
+  --badge-fg: var(--ctp-subtext0);
+  --skeleton: var(--ctp-surface0);
+  --skeleton-shine: var(--ctp-surface1);
+
+  /* Descending saturation, so heading depth reads from colour the way it does
+   * in the editor rather than from size alone. */
+  --color-h1: var(--ctp-mauve);
+  --color-h2: var(--ctp-blue);
+  --color-h3: var(--ctp-sapphire);
+  --color-h4: var(--ctp-teal);
+  --color-h5: var(--ctp-green);
+  --color-h6: var(--ctp-overlay1);
+
+  --color-note: var(--ctp-blue);
+  --color-tip: var(--ctp-green);
+  --color-important: var(--ctp-mauve);
+  --color-warning: var(--ctp-yellow);
+  --color-caution: var(--ctp-red);
+}
+
+/* ── Catppuccin Latte ───────────────────────────────────────────────────── */
+:root[data-theme="light"] {
+  --ctp-base: #eff1f5;
+  --ctp-mantle: #e6e9ef;
+  --ctp-crust: #dce0e8;
+  --ctp-surface0: #ccd0da;
+  --ctp-surface1: #bcc0cc;
+  --ctp-surface2: #acb0be;
+  --ctp-overlay0: #9ca0b0;
+  --ctp-overlay1: #8c8fa1;
+  --ctp-subtext0: #6c6f85;
+  --ctp-subtext1: #5c5f77;
+  --ctp-text: #4c4f69;
+  --ctp-mauve: #8839ef;
+  --ctp-blue: #1e66f5;
+  --ctp-sapphire: #209fb5;
+  --ctp-sky: #04a5e5;
+  --ctp-teal: #179299;
+  --ctp-green: #40a02b;
+  --ctp-yellow: #df8e1d;
+  --ctp-peach: #fe640b;
+  --ctp-maroon: #e64553;
+  --ctp-red: #d20f39;
+  --ctp-pink: #ea76cb;
+  --ctp-lavender: #7287fd;
+
+  --bg: #ffffff;
+  --panel: var(--ctp-base);
+  --stroke: var(--ctp-surface0);
+  --fg: var(--ctp-text);
+  --fg-muted: var(--ctp-subtext0);
+  --link: var(--ctp-blue);
+  --code-bg: var(--ctp-base);
+  --blockquote-border: var(--ctp-surface2);
+  --table-border: var(--ctp-surface0);
+  --table-row-alt: transparent;
+  --err-bg: rgba(210, 15, 57, 0.06);
+  --err-border: var(--ctp-red);
+  --err-fg: var(--ctp-red);
+  --scroll-track: transparent;
+  --scroll-thumb: var(--ctp-surface1);
+  --scroll-thumb-hover: var(--ctp-surface2);
+  --accent: var(--ctp-mauve);
+  --badge-bg: var(--ctp-surface0);
+  --badge-fg: var(--ctp-subtext0);
+  --skeleton: var(--ctp-surface0);
+  --skeleton-shine: var(--ctp-surface1);
+
+  --color-h1: var(--ctp-mauve);
+  --color-h2: var(--ctp-blue);
+  --color-h3: var(--ctp-sapphire);
+  --color-h4: var(--ctp-teal);
+  --color-h5: var(--ctp-green);
+  --color-h6: var(--ctp-overlay1);
+
+  --color-note: var(--ctp-blue);
+  --color-tip: var(--ctp-green);
+  --color-important: var(--ctp-mauve);
+  --color-warning: var(--ctp-yellow);
+  --color-caution: var(--ctp-red);
+}
+
+/* ── Typography ─────────────────────────────────────────────────────────── */
+html,
+body {
+  font-family: var(--mdp-font-sans);
+  font-size: 16.5px;
+  line-height: 1.7;
+  text-rendering: optimizeLegibility;
+}
+
+#content {
+  max-width: var(--mdp-measure);
+  padding: 2.5rem 1.5rem 4rem;
+}
+
+#content h1,
+#content h2,
+#content h3,
+#content h4,
+#content h5,
+#content h6 {
+  line-height: 1.25;
+  letter-spacing: -0.011em;
+  font-weight: 650;
+  margin-block: 1.8em 0.6em;
+}
+
+#content h1 { font-size: 1.9em; }
+#content h2 { font-size: 1.45em; }
+#content h3 { font-size: 1.2em; }
+#content h4 { font-size: 1.05em; }
+
+#content p { margin-block: 0 1.1em; }
+#content li + li { margin-top: 0.25em; }
+
+#content a { text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+/* ── Code ───────────────────────────────────────────────────────────────── */
+#content code,
+#content pre,
+.code-lang {
+  font-family: var(--mdp-font-mono);
+  font-variant-ligatures: contextual;
+}
+
+#content code {
+  font-size: 0.9em;
+  border-radius: 6px;
+}
+
+#content .code-wrap {
+  border: 1px solid var(--stroke);
+  border-radius: var(--mdp-radius);
+  overflow: hidden;
+}
+
+#content .code-wrap pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 0.9rem 1rem;
+  background: var(--code-bg);
+}
+
+/* highlight.js token colours. This is the one place the plugin's variables do
+ * not reach: it loads highlight.js's own github/github-dark stylesheet and
+ * swaps the href on theme toggle, consulting none of them. Overriding the token
+ * classes here is both what makes code look like the editor and what keeps the
+ * page stable if that upstream theme changes. */
+#content .hljs-keyword,
+#content .hljs-selector-tag,
+#content .hljs-literal { color: var(--ctp-mauve); }
+#content .hljs-string,
+#content .hljs-regexp,
+#content .hljs-addition { color: var(--ctp-green); }
+#content .hljs-number,
+#content .hljs-built_in,
+#content .hljs-symbol,
+#content .hljs-bullet { color: var(--ctp-peach); }
+#content .hljs-comment,
+#content .hljs-quote,
+#content .hljs-deletion { color: var(--ctp-overlay1); font-style: italic; }
+#content .hljs-title,
+#content .hljs-title.function_,
+#content .hljs-section { color: var(--ctp-blue); }
+#content .hljs-type,
+#content .hljs-title.class_,
+#content .hljs-class .hljs-title { color: var(--ctp-yellow); }
+#content .hljs-attr,
+#content .hljs-attribute,
+#content .hljs-selector-attr,
+#content .hljs-selector-pseudo { color: var(--ctp-teal); }
+#content .hljs-variable,
+#content .hljs-template-variable,
+#content .hljs-params { color: var(--ctp-text); }
+#content .hljs-meta,
+#content .hljs-doctag { color: var(--ctp-sapphire); }
+#content .hljs-name,
+#content .hljs-tag { color: var(--ctp-blue); }
+#content .hljs-emphasis { font-style: italic; }
+#content .hljs-strong { font-weight: 700; }
+
+/* ── Tables ─────────────────────────────────────────────────────────────── */
+/* Wide tables scroll inside their own box rather than stretching the measure
+ * and forcing the whole page to scroll sideways. */
+#content table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.94em;
+}
+
+#content th,
+#content td { padding: 0.5rem 0.8rem; }
+#content th { background: var(--panel); }
+
+/* ── Blockquotes and GitHub alerts ──────────────────────────────────────── */
+#content blockquote {
+  border-left-width: 3px;
+  border-radius: 0 8px 8px 0;
+  padding: 0.6rem 1rem;
+  background: var(--panel);
+}
+
+#content .markdown-alert {
+  border-left: 3px solid var(--fg-muted);
+  border-radius: 0 8px 8px 0;
+  padding: 0.7rem 1rem;
+  margin-block: 1.2em;
+  background: var(--panel);
+}
+
+#content .markdown-alert-title {
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+#content .markdown-alert-note { border-left-color: var(--color-note); }
+#content .markdown-alert-tip { border-left-color: var(--color-tip); }
+#content .markdown-alert-important { border-left-color: var(--color-important); }
+#content .markdown-alert-warning { border-left-color: var(--color-warning); }
+#content .markdown-alert-caution { border-left-color: var(--color-caution); }
+
+#content .markdown-alert-note .markdown-alert-title { color: var(--color-note); }
+#content .markdown-alert-tip .markdown-alert-title { color: var(--color-tip); }
+#content .markdown-alert-important .markdown-alert-title { color: var(--color-important); }
+#content .markdown-alert-warning .markdown-alert-title { color: var(--color-warning); }
+#content .markdown-alert-caution .markdown-alert-title { color: var(--color-caution); }
+
+/* ── Mermaid ────────────────────────────────────────────────────────────── */
+/* Only the container is ours. Mermaid draws with its own theme and writes
+ * inline styles onto the SVG, so node and edge colours are not reachable from
+ * here -- a diagram that clashes is fixed with a %%{init: {...}}%% directive in
+ * the diagram source, not with CSS. */
+.mermaid-block {
+  background: var(--panel);
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  padding: 1.1rem;
+  margin-block: 1.4em;
+  overflow-x: auto;
+}
+
+.mermaid-svg-wrap svg {
+  display: block;
+  margin-inline: auto;
+  max-width: 100%;
+  height: auto;
+}
+
+/* ── Chrome ─────────────────────────────────────────────────────────────── */
+header { backdrop-filter: blur(10px); }
+
+#fm-panel {
+  border: 1px solid var(--stroke);
+  border-radius: var(--mdp-radius);
+  background: var(--panel);
+}
+
+#content .task-list-item input[type="checkbox"] { accent-color: var(--accent); }
+
+#content .footnotes {
+  border-top: 1px solid var(--stroke);
+  margin-top: 3rem;
+  padding-top: 1rem;
+  font-size: 0.92em;
+  color: var(--fg-muted);
+}
+
+#content img { border-radius: 8px; }
+
+@media (max-width: 900px) {
+  #content { padding: 1.5rem 1rem 3rem; }
+}

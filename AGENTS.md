@@ -7,6 +7,8 @@ git/
 └── config           # Managed gitconfig, included via [include] directive in ~/.gitconfig
 
 nvim/                # Neovim (AstroNvim) config, symlinked to ~/.config/nvim
+└── assets/          # Static files plugins read at runtime (markdown preview page,
+                     #   its Catppuccin stylesheet, and vendor/ browser libraries)
 
 shell/
 ├── init.sh             # Loader — sourced from rc file, sources all topic files
@@ -20,6 +22,36 @@ shell/
 setup/               # Optional install scripts (ghostty, rpi-imager, capslock disable)
 vim/                 # Vim config (vimrc symlinked to ~/.vimrc)
 ```
+
+## Runtime Assets (`nvim/assets/`)
+
+Files here are read by plugins at runtime, not by Lua's `require`. Locate them
+with `vim.fn.stdpath "config"`, never a hard-coded repo path — `nvim/` is
+symlinked to `~/.config/nvim` and the clone itself may live anywhere.
+
+- `index.html` — the markdown preview page. It **shadows** the copy shipped by
+  `selimacerbas/markdown-preview.nvim`: that plugin resolves its template with
+  `nvim_get_runtime_file("assets/index.html", false)`, and `~/.config/nvim` is
+  the first `runtimepath` entry, so ours wins without patching anything inside
+  the plugin directory (and keeps winning across `:Lazy update`). The file
+  records the upstream commit it was forked from; the diff against upstream is
+  deliberately narrow — CDN URLs swapped for `./vendor`, one ESM import swapped
+  for the UMD global, and a CSP added — so it stays cheap to re-apply.
+  Every `__PLACEHOLDER__` in it is substituted by the plugin at write time and
+  must be preserved verbatim.
+- `markdown-preview.css` — Catppuccin theme, inlined by the plugin's
+  `custom_css` option *after* its own styles. Presentation lives here rather
+  than in `index.html` so restyling never touches the fork.
+- `vendor/` — pinned, checksummed browser libraries (mermaid, KaTeX,
+  markdown-it, highlight.js, …) so the preview fetches nothing from the network.
+  `manifest.txt` is the source of truth; `shell/bin/fetch-md-preview-vendor`
+  populates and verifies it. To bump a version: edit the URL in the manifest,
+  run the script with `--update`, review the diff, commit.
+
+**Rule:** if a plugin needs a runtime asset, add it here and reference it via
+`stdpath`. If that asset is third-party code fetched from the internet, pin it
+in `vendor/manifest.txt` with a checksum rather than letting the page load it
+from a CDN.
 
 ## Default Python Environment
 
