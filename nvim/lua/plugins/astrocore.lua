@@ -136,6 +136,24 @@ return {
           end,
         },
       },
+
+      -- Global indent is 4 (see options.opt above), but 4 leading spaces is how
+      -- CommonMark spells "indented code block" -- so `>>` on a nested list item
+      -- can silently turn a bullet into a <pre> in the rendered output. Markdown
+      -- nests at 2 by convention; match it. Kept separate from prose_wrap, which
+      -- also covers text/gitcommit where indent width is irrelevant.
+      markdown_indent = {
+        {
+          event = "FileType",
+          pattern = { "markdown", "mdx" },
+          desc = "Indent markdown two spaces so nesting does not become a code block",
+          callback = function()
+            vim.opt_local.tabstop = 2
+            vim.opt_local.shiftwidth = 2
+            vim.opt_local.softtabstop = 2
+          end,
+        },
+      },
     },
     -- Mappings can be configured through AstroCore as well.
     -- NOTE: keycodes follow the casing in the vimdocs. For example, `<Leader>` must be capitalized
