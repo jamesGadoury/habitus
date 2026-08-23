@@ -83,6 +83,56 @@ _nvim_validate_no_unmanaged() {
     esac
 }
 
+_nvim_sync_plugins() {
+    # Bring this machine's plugin tree in line with the committed lockfile.
+    #
+    # Needed because nothing else does it: at startup lazy.nvim only clones
+    # plugins whose directory is *missing*, and that install pipeline never
+    # looks at a plugin's remote or at lazy-lock.json. So a spec that changes
+    # repos under an unchanged directory name keeps serving the old checkout,
+    # and every machine drifts to whatever commit it happened to fetch. This
+    # is the step that makes `git pull` + install.sh enough on a second box.
+    #
+    # All three verbs are required, in this order -- none subsumes another:
+    #   install  clones plugins that are absent (restore skips uninstalled
+    #            plugins entirely, so it cannot bootstrap a new one)
+    #   clean    drops directories no spec claims any more
+    #   restore  re-clones on a changed remote, then pins every plugin to
+    #            nvim/lazy-lock.json (install ignores the lockfile)
+    # The bang makes each one non-interactive and blocking, which is what
+    # makes them usable from a script at all.
+    #
+    # On an already-synced machine this rewrites lazy-lock.json byte-for-byte,
+    # so it leaves the repo clean; a diff here means a plugin genuinely moved
+    # and is yours to review and commit.
+    if [ ! -x "$_nvim_dest" ]; then
+        printf 'Neovim plugin sync: skipping (no %s)\n' "$_nvim_dest"
+        return 0
+    fi
+    if [ ! -e "$_nvim_config_dir" ]; then
+        printf 'Neovim plugin sync: skipping (no config at %s)\n' "$_nvim_config_dir"
+        return 0
+    fi
+
+    # Bounded so a wedged headless nvim cannot hang the installer. Generous:
+    # a first run on a fresh machine downloads every plugin.
+    _nvim_timeout=""
+    if command -v timeout >/dev/null 2>&1; then
+        _nvim_timeout="timeout 900"
+    fi
+
+    printf "${HLT}Syncing neovim plugins to lazy-lock.json...${RST}\n"
+    # Never fatal: an offline or rate-limited machine should still walk away
+    # with a working nvim binary and config symlink from this step.
+    if $_nvim_timeout "$_nvim_dest" --headless \
+        "+Lazy! install" "+Lazy! clean" "+Lazy! restore" +qa; then
+        printf 'Neovim plugins synced\n'
+    else
+        printf 'Neovim plugin sync failed; run :Lazy restore by hand. Continuing.\n' >&2
+    fi
+    unset _nvim_timeout
+}
+
 do_install() {
     case "$(uname -s)" in
         Linux) ;;
@@ -159,6 +209,9 @@ do_install() {
         ln -s "$_nvim_config_src" "$_nvim_config_dir"
         printf 'Symlinked %s -> %s\n' "$_nvim_config_dir" "$_nvim_config_src"
     fi
+
+    # Last: needs both the binary above and the config symlink just made.
+    _nvim_sync_plugins
 }
 
 do_uninstall() {

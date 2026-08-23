@@ -16,7 +16,9 @@
 -- community.lua for this to work at all: lazy keys plugins by the last path
 -- segment, so both repos collapse onto the name "markdown-preview.nvim" and the
 -- community fragment's build step would run iamcco's node installer inside this
--- plugin's checkout.
+-- plugin's checkout. The explicit `name` below now breaks that collision on its
+-- own, but the import stays out regardless -- it would still pull in iamcco's
+-- plugin for nothing.
 
 --- Read a file whole, or nil if it is not there.
 ---@param path string
@@ -72,6 +74,18 @@ end
 ---@type LazySpec
 return {
   "selimacerbas/markdown-preview.nvim",
+  -- Explicit directory name, because the default is the last path segment and
+  -- that is a name iamcco's plugin already owns on any machine that ran the
+  -- old config. lazy treats an existing directory as installed and its install
+  -- pipeline never checks the remote, so the swap would silently keep serving
+  -- the old checkout -- which has no lua/ tree, hence `module 'markdown_preview'
+  -- not found` from the config function below. Under a distinct name the stale
+  -- clone is merely orphaned and gets picked up by :Lazy clean.
+  --
+  -- Renaming is safe for everything downstream: `main` and every require() go
+  -- through runtimepath, not the directory name, and the <Leader>M mappings
+  -- dispatch on the `cmd` names below.
+  name = "markdown-preview-lua.nvim",
   -- Pure-Lua HTTP server (vim.uv), no external binary. Declared bare on
   -- purpose: markdown_preview drives `live_server.server` directly and never
   -- calls live_server.setup(), so opts here would only register that plugin's
