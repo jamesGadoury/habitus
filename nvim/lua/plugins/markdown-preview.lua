@@ -71,6 +71,65 @@ local function stage_vendor()
   end
 end
 
+--- Is a browser tab currently attached to the preview server on `port`?
+---
+--- The plugin can answer this (`connected_client_count`) only in the instance
+--- that owns the server -- which is exactly the instance that does not need to
+--- ask. A takeover secondary holds no server handle, and no HTTP route reports
+--- the count, so ask the kernel instead: a preview tab keeps an SSE stream open
+--- for as long as it is on screen, which is an ESTABLISHED socket whose *local*
+--- port is the preview port. Match on the local column only -- with the browser
+--- on the same host the client side of the same connection is also ESTABLISHED
+--- and would otherwise be counted twice.
+---
+--- Linux only. Returns nil where /proc/net/tcp is not readable, and the caller
+--- treats nil as "open one anyway": a duplicate tab beats no tab at all.
+---@param port integer
+---@return boolean?
+local function tab_is_attached(port)
+  local fd = io.open("/proc/net/tcp", "r")
+  if not fd then return nil end
+  local want = (":%04X"):format(port)
+  local found = false
+  for line in fd:lines() do
+    -- sl local_address rem_address st ... (the header row has no leading "N:")
+    local local_addr, st = line:match "^%s*%d+:%s+(%S+)%s+%S+%s+(%S+)"
+    if local_addr and st == "01" and local_addr:sub(-#want) == want then
+      found = true
+      break
+    end
+  end
+  fd:close()
+  return found
+end
+
+--- Open the preview tab in the cases where the plugin will not.
+---
+--- In takeover mode the first nvim to preview claims the port and owns the tab;
+--- every later instance is a *secondary* that writes content.md into the shared
+--- workspace and returns early. open_in_browser() is only reached on the primary
+--- path, and so is the "tab was closed, reopen it" check. So once the tab is
+--- shut, <Leader>Mp from a second nvim silently updates a file nobody is
+--- reading -- no error, no window, nothing to look at.
+---
+--- on_start fires on both paths and, crucially, *after* the lock is written, so
+--- the lock's pid says which one we are. The primary is left alone: it opens its
+--- own tab 200ms later and doing it here too would just double the tab.
+---@param url string
+local function open_tab_if_orphaned(url)
+  local ok, lock = pcall(require, "markdown_preview.lock")
+  local data = ok and lock.read()
+  -- No lock (multi mode) or our own pid: the plugin handles the browser.
+  if not data or data.pid == vim.fn.getpid() then return end
+
+  -- Port from the URL we were handed, rather than restating the 8421 that
+  -- takeover mode picks for `port = 0` -- one less thing to keep in step.
+  local port = tonumber(url:match "^%a+://[^/]+:(%d+)/")
+  if not port or tab_is_attached(port) then return end
+
+  require("markdown_preview.util").open_in_browser(url, require("markdown_preview").config.browser)
+end
+
 ---@type LazySpec
 return {
   "selimacerbas/markdown-preview.nvim",
@@ -101,6 +160,9 @@ return {
     -- retargets that same tab. This is the fix for both old annoyances: the tab
     -- no longer closes on buffer switch (mkdp's g:mkdp_auto_close), and
     -- previews no longer pile up one window per file.
+    --
+    -- The one hole it opens -- a *secondary* nvim can retarget the content but
+    -- cannot open a tab to show it in -- is patched by the on_start hook below.
     instance_mode = "takeover",
     -- `workspace_dir` is deliberately unset: takeover mode ignores it and
     -- serves out of util.shared_workspace() unconditionally, so setting it here
@@ -118,6 +180,9 @@ return {
     -- Match the terminal rather than the desktop light/dark preference. The
     -- in-page header toggle still flips it per session.
     default_theme = "dark",
+    -- Fires on both the primary and the secondary start path; see the function
+    -- for why only the secondary needs anything doing.
+    hooks = { on_start = open_tab_if_orphaned },
     -- `browser` deliberately left nil -> xdg-open -> the desktop default. The
     -- plugin does not consult $BROWSER, and xdg-open resolves to firefox here
     -- anyway, so naming it would buy determinism at the cost of portability.
