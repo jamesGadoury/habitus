@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# ports — list listening TCP/UDP ports on this host or on a host over ssh
+#
+# Usage: ports [OPTIONS] [SSH-DESTINATION]
+#   -t, --tcp     TCP only
+#   -u, --udp     UDP only
+#   -s, --sudo    Use `sudo -n` on the target so every socket shows its
+#                 process (without root, only your own processes are named).
+#                 Never prompts; falls back to an unprivileged listing.
+#   -h, --help    Show this help message
+#
+# With no destination, lists this host. Otherwise the destination is
+# anything ssh accepts (host, user@host, an ssh config alias); the probe
+# runs through `sh -s` there, so the remote login shell can be anything.
+# Uses ss when the target has it, else netstat.
+set -euo pipefail
+IFS=$'\n\t'
+
+# Runs on the target, possibly a remote POSIX sh: keep it POSIX. It is
+# shipped over ssh as its source text (see probe_src), so it must be
+# self-contained and its closing brace must be the first `}` in column 0.
+# Prints one line per socket: proto<TAB>address<TAB>port<TAB>process
+_ports_probe() {
+  _protos=$1
+  _sudo=0
+  if [ "$2" = 1 ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+      :
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+      _sudo=1
+    else
+      printf 'ports: sudo needs a password or is unavailable on %s; listing without it\n' \
+        "$(hostname 2>/dev/null || echo target)" >&2
+    fi
+  fi
+  # A function, not a "sudo -n" string: the caller's IFS may not split on spaces.
+  _run() { if [ "$_sudo" = 1 ]; then sudo -n "$@"; else "$@"; fi; }
+  if command -v ss >/dev/null 2>&1; then
+    # Always -tu, filtered below: with one protocol ss drops the Netid column.
+    # Netid State Recv-Q Send-Q Local:Port Peer:Port [users:(("name",pid=N,fd=N),...)]
+    _run ss -lntup | awk -v OFS='\t' -v want="$_protos" '
+      NR == 1 { next }
+      want != "tu" && substr($1, 1, 1) != want { next }
+      {
+        local = $5
+        i = match(local, /:[^:]*$/)
+        addr = substr(local, 1, i - 1); port = substr(local, i + 1)
+        gsub(/[][]/, "", addr)
+        proc = "-"
+        if (match($0, /users:\(\("[^"]*",pid=[0-9]+/)) {
+          s = substr($0, RSTART + 9, RLENGTH - 9)
+          name = s; sub(/".*/, "", name)
+          pid = s; sub(/.*pid=/, "", pid)
+          proc = name "[" pid "]"
+        }
+        print $1, addr, port, proc
+      }'
+  elif command -v netstat >/dev/null 2>&1; then
+    # Proto Recv-Q Send-Q Local Foreign [State] [PID/Program]
+    _run netstat -lntup 2>/dev/null | awk -v OFS='\t' -v want="$_protos" '
+      $1 !~ /^(tcp|udp)/ { next }
+      want != "tu" && substr($1, 1, 1) != want { next }
+      {
+        proto = $1; sub(/6$/, "", proto)
+        local = $4
+        i = match(local, /:[^:]*$/)
+        addr = substr(local, 1, i - 1); port = substr(local, i + 1)
+        proc = "-"
+        # PID/Program may hold spaces ("812/sshd: /usr/sbi"), so find the
+        # field that starts it rather than trusting $NF.
+        for (f = 6; f <= NF; f++) {
+          if ($f ~ /^[0-9]+\//) {
+            pid = $f; sub(/\/.*/, "", pid)
+            name = $f; sub(/^[0-9]+\//, "", name); sub(/:$/, "", name)
+            proc = name "[" pid "]"
+            break
+          }
+        }
+        print proto, addr, port, proc
+      }'
+  else
+    echo "ports: neither ss nor netstat found on target" >&2
+    return 1
+  fi
+}
+
+usage() { sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; }
+
+protos=tu
+use_sudo=0
+dest=
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  -t | --tcp) protos=t ;;
+  -u | --udp) protos=u ;;
+  -s | --sudo) use_sudo=1 ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  -*)
+    printf 'ports: unknown option: %s\n' "$1" >&2
+    exit 2
+    ;;
+  *)
+    [[ -z "$dest" ]] || {
+      echo "ports: only one destination" >&2
+      exit 2
+    }
+    dest=$1
+    ;;
+  esac
+  shift
+done
+
+if [[ -z "$dest" ]]; then
+  rows=$(_ports_probe "$protos" "$use_sudo")
+else
+  # BatchMode: fail instead of prompting for a password or passphrase.
+  # Not `declare -f`: bash rewrites nested functions with the non-POSIX
+  # `function` keyword, which dash rejects.
+  probe_src=$(sed -n '/^_ports_probe() {$/,/^}$/p' "$0")
+  rows=$(printf '%s\n_ports_probe %s %s\n' "$probe_src" "$protos" "$use_sudo" |
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "$dest" sh -s)
+fi
+
+if [[ -z "$rows" ]]; then
+  echo "ports: no listening sockets found" >&2
+  exit 0
+fi
+
+bold='' reset=''
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  bold=$(tput bold 2>/dev/null || true)
+  reset=$(tput sgr0 2>/dev/null || true)
+fi
+
+# Sort by port, then proto, then address; drop exact duplicates. Not
+# `sort -u`: with keys it dedups on the keys alone and would merge two
+# processes listening on the same port.
+sorted=$(sort -t $'\t' -k3,3n -k1,1 -k2,2 -k4,4 <<<"$rows" | uniq)
+awk -F '\t' -v b="$bold" -v r="$reset" '
+  { p[NR] = $1; a[NR] = $2; n[NR] = $3; c[NR] = $4; if (length($2) > w) w = length($2) }
+  END {
+    if (w < 7) w = 7
+    printf "%s%-5s  %-*s  %5s  %s%s\n", b, "PROTO", w, "ADDRESS", "PORT", "PROCESS", r
+    for (i = 1; i <= NR; i++) printf "%-5s  %-*s  %5s  %s\n", p[i], w, a[i], n[i], c[i]
+  }' <<<"$sorted"
+
+if [[ "$use_sudo" = 0 && (-n "$dest" || $EUID -ne 0) ]] && grep -q $'\t-$' <<<"$sorted"; then
+  echo "(some processes hidden: they belong to other users; try --sudo)" >&2
+fi
