@@ -1,0 +1,14 @@
+{#- Qwen ChatML with thinking forced off: the generation prompt pre-closes the
+    think block, so the model answers directly. Used by shell/bin/llama because
+    llama-completion does not accept --chat-template-kwargs enable_thinking. -#}
+{%- for message in messages %}
+<|im_start|>{{ message.role }}
+{{ message.content }}<|im_end|>
+{% endfor %}
+{%- if add_generation_prompt %}
+<|im_start|>assistant
+<think>
+
+</think>
+
+{% endif %}

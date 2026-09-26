@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# llama — ask a local LLM a question without running a server.
+# Each call loads the model (mmap'd, so warm loads come from the page cache),
+# answers, and exits. Built on llama.cpp; install it with
+# setup/install-llama-cpp.sh. Models are listed in shell/llama/models.conf.
+#
+# Usage:
+#   llama "question"                    one-shot answer on stdout
+#   git diff | llama "commit message"   stdin is appended to the prompt
+#   llama < prompt.txt                  stdin alone is the prompt
+#   llama                               interactive chat (TTY, no prompt)
+#   llama -m fast "..."                 pick a model alias from models.conf
+#   llama -s "be terse" "..."           system prompt
+#   llama pull [alias...|all]           download models (default: default)
+#   llama list                          show models and whether they are present
+#   llama bench [alias]                 measure prompt/generation speed here
+#
+# Env: LLAMA_MODEL (alias, default "default"), LLAMA_THREADS (default:
+#   physical cores), LLAMA_CTX (default 8192), LLAMA_NICE (default 10),
+#   LLAMA_MODEL_DIR, LLAMA_DEBUG=1 (show llama.cpp logs on stderr).
+
+set -euo pipefail
+IFS=$'\n\t'
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+CONF="$(dirname "$SELF")/../llama/models.conf"
+MODEL_DIR="${LLAMA_MODEL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/llama/models}"
+LLAMA_BIN="${LLAMA_BIN:-$HOME/.local/opt/llama.cpp/bin}"
+# Inference saturates every thread it is given; run it at lower priority so
+# the desktop stays responsive while it works.
+NICE="${LLAMA_NICE:-10}"
+tmp="" # prompt file; global so the EXIT trap can see it
+
+if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
+  C_ERR="$(tput setaf 1)" C_OK="$(tput setaf 2)" C_RST="$(tput sgr0)"
+else
+  C_ERR="" C_OK="" C_RST=""
+fi
+die() {
+  printf '%sllama:%s %s\n' "$C_ERR" "$C_RST" "$*" >&2
+  exit 1
+}
+
+usage() {
+  sed -n '/^# Usage:/,/^# Env:/{/^# Env:/d;s/^# \{0,1\}//;p}' "$SELF"
+}
+
+# Look up an alias in models.conf. Sets M_REPO, M_FILE, M_ARGS (array, with
+# {confdir} expanded to the directory holding models.conf).
+resolve() {
+  local alias="$1" line
+  [[ -f "$CONF" ]] || die "missing $CONF"
+  line="$(awk -v a="$alias" '!/^[[:space:]]*(#|$)/ && $1 == a' "$CONF")"
+  [[ -n "$line" ]] || die "unknown model '$alias' (see: llama list)"
+  local fields
+  IFS=$' \t' read -r -a fields <<<"$line"
+  M_REPO="${fields[1]}"
+  M_FILE="${fields[2]}"
+  M_ARGS=("${fields[@]:3}")
+  M_ARGS=("${M_ARGS[@]//\{confdir\}/$(dirname "$CONF")}")
+}
+
+aliases() {
+  awk '!/^[[:space:]]*(#|$)/ {print $1}' "$CONF"
+}
+
+tool() {
+  local bin="$LLAMA_BIN/$1"
+  [[ -x "$bin" ]] || die "$bin not found — run setup/install-llama-cpp.sh"
+  printf '%s\n' "$bin"
+}
+
+threads() {
+  if [[ -n "${LLAMA_THREADS:-}" ]]; then
+    printf '%s\n' "$LLAMA_THREADS"
+    return
+  fi
+  local n
+  n="$(lscpu -p=socket,core 2>/dev/null | grep -v '^#' | sort -u | wc -l)" || n=0
+  [[ "$n" -gt 0 ]] || n="$(nproc)"
+  printf '%s\n' "$n"
+}
+
+# Resolve an alias to a downloaded model. Sets M_PATH plus resolve()'s
+# globals — call it directly, not in $(...), or they are lost with the subshell.
+load_model() {
+  resolve "$1"
+  M_PATH="$MODEL_DIR/$M_FILE"
+  [[ -f "$M_PATH" ]] || die "model '$1' not downloaded — run: llama pull $1"
+}
+
+cmd_pull() {
+  local targets=("$@")
+  [[ ${#targets[@]} -gt 0 ]] || targets=(default)
+  [[ "${targets[0]}" == all ]] && mapfile -t targets < <(aliases)
+  mkdir -p "$MODEL_DIR"
+  local alias url dest want got
+  for alias in "${targets[@]}"; do
+    resolve "$alias"
+    dest="$MODEL_DIR/$M_FILE"
+    if [[ -f "$dest" ]]; then
+      printf '%s: already present (%s)\n' "$alias" "$dest"
+      continue
+    fi
+    url="https://huggingface.co/$M_REPO/resolve/main/$M_FILE"
+    # Hugging Face reports the LFS object's sha256 as X-Linked-Etag.
+    want="$(curl -fsSIL "$url" | tr -d '\r"' | awk -F': ' 'tolower($1) == "x-linked-etag" {print $2; exit}')"
+    printf '%s: downloading %s/%s\n' "$alias" "$M_REPO" "$M_FILE"
+    curl -fL --progress-bar -C - -o "$dest.part" "$url"
+    if [[ -n "$want" ]]; then
+      got="$(sha256sum "$dest.part" | cut -d' ' -f1)"
+      if [[ "$got" != "$want" ]]; then
+        rm -f "$dest.part"
+        die "$alias: sha256 mismatch (want $want, got $got)"
+      fi
+    else
+      printf '%s: warning: no checksum from server, not verified\n' "$alias" >&2
+    fi
+    mv "$dest.part" "$dest"
+    printf '%s%s: ok%s\n' "$C_OK" "$alias" "$C_RST"
+  done
+}
+
+cmd_list() {
+  local alias path state
+  for alias in $(aliases); do
+    resolve "$alias"
+    path="$MODEL_DIR/$M_FILE"
+    if [[ -f "$path" ]]; then
+      state="$(du -h "$path" | cut -f1)"
+    else
+      state="missing"
+    fi
+    printf '%-8s %-7s %s/%s\n' "$alias" "$state" "$M_REPO" "$M_FILE"
+  done
+}
+
+cmd_bench() {
+  load_model "${1:-${LLAMA_MODEL:-default}}"
+  local bin
+  bin="$(tool llama-bench)"
+  "$bin" -m "$M_PATH" -t "$(threads)" -fa 1 -p 512 -n 128
+}
+
+# Clean llama-completion's stdout while still streaming tokens as they come:
+# drop the trailing " [end of text]" marker, and if the model opens a <think>
+# block anyway (models.conf's template should prevent it), send the reasoning
+# to stderr so a long think is visible progress rather than silence, and keep
+# stdout for the answer alone.
+clean_stream() {
+  perl -e '
+    $| = 1;
+    STDERR->autoflush(1);
+    my ($buf, $state, $fresh) = ("", "lead", 0);
+    sub step {
+      my $eof = shift;
+      while (1) {
+        if ($state eq "lead") {
+          $buf =~ s/\A\s+//;
+          if ($buf =~ s/\A<think>//) { ($state, $fresh) = ("think", 1); next }
+          return if !$eof && ($buf eq "" || index("<think>", $buf) == 0);
+          $state = "answer";
+        } elsif ($state eq "think") {
+          # Trim whitespace only at the start of the block, not mid-sentence.
+          if ($fresh) {
+            $buf =~ s/\A\s+//;
+            $fresh = 0 if length $buf;
+          }
+          if ($buf =~ s/\A(.*?)<\/think>//s) {
+            (my $thought = $1) =~ s/\s+\z//;
+            print STDERR $thought, "\n" if length $thought;
+            $state = "lead";
+            next;
+          }
+          if ($eof) {
+            $buf =~ s/\s*\[end of text\]\s*\z//;
+            print STDERR $buf, "\n" if length $buf;
+            return;
+          }
+          print STDERR substr($buf, 0, length($buf) - 32, "") if length($buf) > 32;
+          return;
+        } else {
+          if ($eof) {
+            $buf =~ s/\s*\[end of text\]\s*\z//;
+            $buf =~ s/\s+\z//;
+            print $buf, "\n";
+            return;
+          }
+          print substr($buf, 0, length($buf) - 32, "") if length($buf) > 32;
+          return;
+        }
+      }
+    }
+    while (sysread(STDIN, my $chunk, 4096)) {
+      $buf .= $chunk;
+      step(0);
+    }
+    step(1);
+  '
+}
+
+main() {
+  case "${1:-}" in
+  pull) shift && cmd_pull "$@" && return ;;
+  list) cmd_list && return ;;
+  bench) shift && cmd_bench "$@" && return ;;
+  -h | --help) usage && return ;;
+  esac
+
+  local alias="${LLAMA_MODEL:-default}" system=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -m | --model) alias="${2:?-m needs an alias}" && shift 2 ;;
+    -s | --system) system="${2:?-s needs text}" && shift 2 ;;
+    -h | --help) usage && return ;;
+    --) shift && break ;;
+    -*) die "unknown option $1 (see: llama --help)" ;;
+    *) break ;;
+    esac
+  done
+
+  load_model "$alias"
+  local common=(-m "$M_PATH" -t "$(threads)" -c "${LLAMA_CTX:-8192}" -fa on
+  "${M_ARGS[@]}")
+  [[ -n "$system" ]] && common+=(-sys "$system")
+
+  # Only read stdin when something was actually piped or redirected in;
+  # an inherited, never-closing stdin (cron, editors, `&`) would hang `cat`.
+  local prompt="$*" piped=""
+  [[ -p /dev/stdin || -f /dev/stdin ]] && piped=1
+  if [[ -z "$prompt" && -z "$piped" ]]; then
+    [[ -t 0 ]] || die "no prompt given (see: llama --help)"
+    # Interactive chat: the model stays loaded until you quit.
+    local cli
+    cli="$(tool llama-cli)"
+    exec nice -n "$NICE" "$cli" "${common[@]}"
+  fi
+
+  tmp="$(mktemp "${TMPDIR:-/tmp}/llama.XXXXXX")"
+  trap 'rm -f "$tmp"' EXIT
+  if [[ -z "$piped" ]]; then
+    printf '%s' "$prompt" >"$tmp"
+  elif [[ -n "$prompt" ]]; then
+    { printf '%s\n\n' "$prompt" && cat; } >"$tmp"
+  else
+    cat >"$tmp"
+  fi
+  [[ -s "$tmp" ]] || die "empty prompt"
+
+  local bin log=/dev/null
+  bin="$(tool llama-completion)"
+  [[ -n "${LLAMA_DEBUG:-}" ]] && log=/dev/stderr
+  nice -n "$NICE" "$bin" "${common[@]}" -f "$tmp" -st --no-display-prompt \
+    --no-warmup --simple-io </dev/null 2>"$log" | clean_stream
+}
+
+main "$@"

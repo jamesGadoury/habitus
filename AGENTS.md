@@ -17,9 +17,10 @@ shell/
 ├── bin/                # Standalone executable scripts, symlinked to ~/.local/bin
 ├── topics/*.sh         # Auto-sourced topic files, split by concern
 ├── python/             # Default Python env: pyproject.toml + uv.lock (.venv gitignored)
+├── llama/models.conf   # Model aliases for the `llama` local-LLM wrapper (bin/llama)
 └── local.d/*.sh        # Gitignored machine-specific overrides
 
-setup/               # Optional install scripts (ghostty, rpi-imager, capslock disable)
+setup/               # Optional install scripts (ghostty, llama.cpp, rpi-imager, capslock disable)
 vim/                 # Vim config (vimrc symlinked to ~/.vimrc)
 ```
 
@@ -73,6 +74,41 @@ Workflow:
 - `pydeps` — open `pyproject.toml` in `$EDITOR`
 
 `init.sh` sources all `topics/*.sh` in sorted order, then all `local.d/*.sh`. It also ensures `~/.local/bin` is on `PATH`.
+
+## Local LLM (`llama`)
+
+`shell/bin/llama` asks a local model a question **without a server**: every
+call loads the GGUF (mmap'd, so warm loads come from the page cache), answers,
+and exits. `llama "q"` one-shots to stdout; piped stdin is appended to the
+prompt; `llama` alone on a TTY opens an interactive chat (`llama-cli`).
+
+- `setup/install-llama-cpp.sh` builds llama.cpp from source with
+  `GGML_NATIVE=ON` (static, only `llama-cli`/`llama-completion`/`llama-bench`)
+  into `~/.local/opt/llama.cpp`, then pulls the models. No sudo. The tag is
+  pinned by `LLAMA_CPP_REF`; to bump it, change the default and rerun
+  (`$PREFIX/REF` makes reruns at the same ref a no-op).
+- `shell/llama/models.conf` is the source of truth for model aliases
+  (`default`, `fast`, `tiny`) and per-model sampling args. `llama pull`
+  downloads into `~/.local/share/llama/models` and verifies the sha256 that
+  Hugging Face reports as `X-Linked-Etag`. To switch models, edit the line and
+  `llama pull <alias>`; check speed with `llama bench <alias>`.
+- Thinking is forced off by `shell/llama/qwen-nothink.jinja`, which is passed
+  through `models.conf` (`{confdir}` expands to that directory). `llama-completion`
+  rejects `--chat-template-kwargs` and ignores `-rea off`. With the GGUF's own
+  template, Qwen3.5-4B reasoned for minutes on ~40% of prompts, even "hello".
+- One-shot output goes through `llama-completion`. `clean_stream` drops the
+  trailing `[end of text]`, and if the model opens a `<think>` block anyway, the
+  reasoning goes to stderr and the answer alone to stdout, all while streaming.
+  `llama-cli` is only used for interactive chat because it prints a banner on
+  stdout.
+- Inference runs under `nice -n ${LLAMA_NICE:-10}`. Generating saturates the 4
+  cores it uses, which is expected, and the lower priority keeps the desktop
+  responsive.
+- Stdin is read only when it is a pipe or regular file — an inherited open
+  stdin (cron, editors, `&`) would otherwise block forever.
+- Wrapper env vars are `LLAMA_MODEL`, `LLAMA_THREADS`, `LLAMA_CTX`,
+  `LLAMA_NICE`, `LLAMA_MODEL_DIR`, `LLAMA_DEBUG`. Do not introduce names under llama.cpp's
+  own `LLAMA_ARG_*`, `LLAMA_CACHE`, or `LLAMA_LOG_*`, which change its behavior.
 
 ## Adding a New Topic File
 
