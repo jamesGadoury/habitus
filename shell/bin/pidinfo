@@ -99,80 +99,93 @@ _pidinfo_probe() {
   done
 }
 
-usage() { sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; }
+usage() { sed -n '2,/^$/s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 
-pids=()
-use_sudo=0
-dest=
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-  -s | --sudo) use_sudo=1 ;;
-  -h | --help)
-    usage
-    exit 0
-    ;;
-  -*)
-    printf 'pidinfo: unknown option: %s\n' "$1" >&2
-    exit 2
-    ;;
-  *)
-    if [[ "$1" =~ ^[0-9]+$ ]]; then
-      pids+=("$1")
-    elif [[ -z "$dest" ]]; then
-      dest=$1
-    else
-      printf 'pidinfo: not a pid: %s\n' "$1" >&2
-      exit 2
-    fi
-    ;;
-  esac
-  shift
-done
-[[ ${#pids[@]} -gt 0 ]] || {
-  usage >&2
-  exit 2
+# render ROWS DEST — the probe's label/value lines as one block per process.
+# Returns 1 if any pid was missing.
+render() {
+  local rows=$1 dest=$2
+  local bold='' dim='' red='' reset=''
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    bold=$(tput bold 2>/dev/null || true)
+    dim=$(tput dim 2>/dev/null || true)
+    red=$(tput setaf 1 2>/dev/null || true)
+    reset=$(tput sgr0 2>/dev/null || true)
+  fi
+
+  local where=${dest:+ on $dest}
+  local status=0 first=1 pid='' key value
+  while IFS=$'\t' read -r key value; do
+    case "$key" in
+    missing)
+      printf '%spidinfo: no process %s%s%s\n' "$red" "$value" "$where" "$reset" >&2
+      status=1
+      ;;
+    pid)
+      [[ "$first" = 1 ]] || echo
+      first=0 pid=$value
+      ;;
+    name) printf '%s%s[%s]%s%s\n' "$bold" "$value" "$pid" "$where" "$reset" ;;
+    hidden)
+      printf '%s(some details hidden: not your process; try --sudo)%s\n' "$dim" "$reset" >&2
+      ;;
+    *) printf '%s%-10s%s %s\n' "$bold" "$key" "$reset" "$value" ;;
+    esac
+  done <<<"$rows"
+  return "$status"
 }
 
-if [[ -z "$dest" ]]; then
-  rows=$(_pidinfo_probe "$use_sudo" "${pids[@]}")
-else
-  # BatchMode: fail instead of prompting for a password or passphrase.
-  # Not `declare -f`: bash rewrites nested functions with the non-POSIX
-  # `function` keyword, which dash rejects.
-  probe_src=$(sed -n '/^_pidinfo_probe() {$/,/^}$/p' "$0")
-  pid_list=$(
-    IFS=' '
-    echo "${pids[*]}"
-  )
-  rows=$(printf '%s\n_pidinfo_probe %s %s\n' "$probe_src" "$use_sudo" "$pid_list" |
-    ssh -o BatchMode=yes -o ConnectTimeout=10 "$dest" sh -s)
-fi
+main() {
+  local -a pids=()
+  local use_sudo=0 dest=
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -s | --sudo) use_sudo=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    -*)
+      printf 'pidinfo: unknown option: %s\n' "$1" >&2
+      exit 2
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        pids+=("$1")
+      elif [[ -z "$dest" ]]; then
+        dest=$1
+      else
+        printf 'pidinfo: not a pid: %s\n' "$1" >&2
+        exit 2
+      fi
+      ;;
+    esac
+    shift
+  done
+  [[ ${#pids[@]} -gt 0 ]] || {
+    usage >&2
+    exit 2
+  }
 
-bold='' dim='' red='' reset=''
-if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-  bold=$(tput bold 2>/dev/null || true)
-  dim=$(tput dim 2>/dev/null || true)
-  red=$(tput setaf 1 2>/dev/null || true)
-  reset=$(tput sgr0 2>/dev/null || true)
-fi
+  local rows probe_src pid_list
+  if [[ -z "$dest" ]]; then
+    rows=$(_pidinfo_probe "$use_sudo" "${pids[@]}")
+  else
+    # BatchMode: fail instead of prompting for a password or passphrase.
+    # Not `declare -f`: bash rewrites nested functions with the non-POSIX
+    # `function` keyword, which dash rejects.
+    probe_src=$(sed -n '/^_pidinfo_probe() {$/,/^}$/p' "${BASH_SOURCE[0]}")
+    pid_list=$(
+      IFS=' '
+      echo "${pids[*]}"
+    )
+    rows=$(printf '%s\n_pidinfo_probe %s %s\n' "$probe_src" "$use_sudo" "$pid_list" |
+      ssh -o BatchMode=yes -o ConnectTimeout=10 "$dest" sh -s)
+  fi
+  render "$rows" "$dest"
+}
 
-where=${dest:+ on $dest}
-status=0 first=1 pid=
-while IFS=$'\t' read -r key value; do
-  case "$key" in
-  missing)
-    printf '%spidinfo: no process %s%s%s\n' "$red" "$value" "$where" "$reset" >&2
-    status=1
-    ;;
-  pid)
-    [[ "$first" = 1 ]] || echo
-    first=0 pid=$value
-    ;;
-  name) printf '%s%s[%s]%s%s\n' "$bold" "$value" "$pid" "$where" "$reset" ;;
-  hidden)
-    printf '%s(some details hidden: not your process; try --sudo)%s\n' "$dim" "$reset" >&2
-    ;;
-  *) printf '%s%-10s%s %s\n' "$bold" "$key" "$reset" "$value" ;;
-  esac
-done <<<"$rows"
-exit "$status"
+# Sourcing the file (to test a function) defines everything but runs nothing.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
