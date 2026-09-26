@@ -177,6 +177,11 @@ top of `llm/init.lua`.
 - Requests run in their own process group (`detach`), and cancelling kills the
   whole group. Signalling only the bash wrapper would leave `llama-completion`
   running.
+- **Closing the answer window cancels; hiding it does not.** `WinClosed` (last
+  window showing the buffer) and `BufUnload`/`BufWipeout` call `M.cancel()`;
+  `M.toggle` sets a `hiding` flag around its close so `<Leader>ao` and the menu
+  leave the stream running. `ui.buf()` replaces a buffer that `:bdelete` left
+  valid but unloaded, since appending to one throws.
 
 ## Adding a New Topic File
 

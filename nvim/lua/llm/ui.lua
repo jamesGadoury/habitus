@@ -11,7 +11,12 @@ local NAME = "llm://answer"
 ---@return integer buf
 function M.buf()
   local buf = vim.fn.bufnr(NAME)
-  if buf ~= -1 and vim.api.nvim_buf_is_valid(buf) then return buf end
+  if buf ~= -1 and vim.api.nvim_buf_is_valid(buf) then
+    if vim.api.nvim_buf_is_loaded(buf) then return buf end
+    -- :bdelete unloads the buffer but keeps its number (and name), and an
+    -- unloaded buffer has no lines to append to. Start over with a new one.
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end
   buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(buf, NAME)
   vim.bo[buf].filetype = "markdown"
@@ -19,6 +24,10 @@ function M.buf()
   vim.bo[buf].swapfile = false
   return buf
 end
+
+---@param buf integer
+---@return boolean
+function M.is_answer(buf) return buf == vim.fn.bufnr(NAME) end
 
 ---@return integer? win the window showing the answer in this tabpage
 function M.win()
@@ -53,14 +62,6 @@ end
 function M.close()
   local win = M.win()
   if win and #vim.api.nvim_tabpage_list_wins(0) > 1 then vim.api.nvim_win_close(win, false) end
-end
-
-function M.toggle()
-  if M.win() then
-    M.close()
-  else
-    M.open()
-  end
 end
 
 ---@param text string shown in the window's winbar

@@ -12,6 +12,9 @@
 --   {Visual}<CR> / {Visual}R   the same, with just the selected text
 --   Y         copy the whole answer to the clipboard (plain `y` works for parts)
 --   <C-c>     stop generating          q   close the window
+--
+-- Closing the answer window (q, :q, :bd, …) stops generating; hiding it with
+-- <Leader>ao or the menu does not, so an answer can keep streaming out of view.
 
 local backend = require "llm.backend"
 local ui = require "llm.ui"
@@ -218,7 +221,21 @@ function M.cancel()
   ui.status("■ " .. label() .. " · stopped")
 end
 
-M.toggle = ui.toggle
+-- Set while the answer window is being hidden rather than closed.
+local hiding = false
+
+--- Show or hide the answer window. Hiding leaves a running request alone.
+function M.toggle()
+  if ui.win() then
+    hiding = true
+    local ok, err = pcall(ui.close)
+    hiding = false
+    if not ok then error(err, 0) end
+  else
+    answer_maps(ui.buf())
+    ui.open()
+  end
+end
 
 function M.pick_model()
   local models, err = backend.models()
@@ -245,7 +262,7 @@ function M.menu()
       if input and input ~= "" then M.ask({ buf = ctx.buf, row = ctx.row, ft = ctx.ft }, input) end
     end)
   end)
-  add(ui.win() and "Hide the answer" or "Show the last answer", ui.toggle)
+  add(ui.win() and "Hide the answer" or "Show the last answer", M.toggle)
   if state.job then add("Stop generating", M.cancel) end
   add("Model: " .. label() .. " (change…)", M.pick_model)
 
@@ -257,9 +274,32 @@ function M.menu()
   end)
 end
 
-vim.api.nvim_create_autocmd("VimLeavePre", {
-  group = vim.api.nvim_create_augroup("llm", { clear = true }),
-  callback = function() M.cancel() end,
+local group = vim.api.nvim_create_augroup("llm", { clear = true })
+
+vim.api.nvim_create_autocmd("VimLeavePre", { group = group, callback = function() M.cancel() end })
+
+-- Closing the last window showing the answer stops the request.
+vim.api.nvim_create_autocmd("WinClosed", {
+  group = group,
+  callback = function(args)
+    if hiding or not state.job then return end
+    local win = tonumber(args.match)
+    if not win or not vim.api.nvim_win_is_valid(win) then return end
+    local buf = vim.api.nvim_win_get_buf(win)
+    if not ui.is_answer(buf) then return end
+    for _, other in ipairs(vim.fn.win_findbuf(buf)) do
+      if other ~= win then return end
+    end
+    M.cancel()
+  end,
+})
+
+-- So does deleting the answer buffer, even from a window that isn't showing it.
+vim.api.nvim_create_autocmd({ "BufUnload", "BufWipeout" }, {
+  group = group,
+  callback = function(args)
+    if state.job and ui.is_answer(args.buf) then M.cancel() end
+  end,
 })
 
 return M
