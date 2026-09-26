@@ -2,10 +2,10 @@
 --
 -- Default is the `llama` wrapper (shell/bin/llama): no server, every request
 -- loads the GGUF and exits, and models/sampling live in shell/llama/models.conf
--- rather than here. When $OLLAMA_URL is set (and non-empty) requests go to that
--- Ollama server instead; $OLLAMA_MODEL picks the model, else the first one the
--- server lists. The env is read on every call, so `:let $OLLAMA_URL = ""`
--- switches back to llama without a restart.
+-- rather than here. When $HABITUS_OLLAMA_URL is set (and non-empty) requests go
+-- to that Ollama server instead; $HABITUS_OLLAMA_MODEL picks the model, else the
+-- first one the server lists. The env is read on every call, so
+-- `:let $HABITUS_OLLAMA_URL = ""` switches back to llama without a restart.
 --
 -- Not $OLLAMA_HOST: the ollama CLI reads that for its own bind/client address,
 -- and a machine running a local ollama would silently flip backends.
@@ -19,7 +19,7 @@ local ollama_default = {}
 
 ---@return string? url Ollama base URL without a trailing slash, or nil for llama
 local function ollama_url()
-  local url = vim.env.OLLAMA_URL
+  local url = vim.env.HABITUS_OLLAMA_URL
   if not url or url == "" then return nil end
   return (url:gsub("/+$", ""))
 end
@@ -63,9 +63,9 @@ end
 function M.model()
   local name = M.name()
   if chosen[name] then return chosen[name] end
-  if name == "llama" then return vim.env.LLAMA_MODEL or "default" end
+  if name == "llama" then return vim.env.HABITUS_LLAMA_MODEL or "default" end
 
-  if vim.env.OLLAMA_MODEL and vim.env.OLLAMA_MODEL ~= "" then return vim.env.OLLAMA_MODEL end
+  if vim.env.HABITUS_OLLAMA_MODEL and vim.env.HABITUS_OLLAMA_MODEL ~= "" then return vim.env.HABITUS_OLLAMA_MODEL end
   local url = ollama_url() --[[@as string]]
   if not ollama_default[url] then
     local models, err = M.models()
@@ -82,8 +82,8 @@ end
 function M.peek_model()
   local name = M.name()
   if chosen[name] then return chosen[name] end
-  if name == "llama" then return vim.env.LLAMA_MODEL or "default" end
-  if vim.env.OLLAMA_MODEL and vim.env.OLLAMA_MODEL ~= "" then return vim.env.OLLAMA_MODEL end
+  if name == "llama" then return vim.env.HABITUS_LLAMA_MODEL or "default" end
+  if vim.env.HABITUS_OLLAMA_MODEL and vim.env.HABITUS_OLLAMA_MODEL ~= "" then return vim.env.HABITUS_OLLAMA_MODEL end
   return ollama_default[ollama_url()] or "auto"
 end
 

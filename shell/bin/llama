@@ -16,21 +16,23 @@
 #   llama list                          show models and whether they are present
 #   llama bench [alias]                 measure prompt/generation speed here
 #
-# Env: LLAMA_MODEL (alias, default "default"), LLAMA_THREADS (default:
-#   physical cores), LLAMA_CTX (default 8192), LLAMA_NICE (default 10),
-#   LLAMA_MODEL_DIR, LLAMA_DEBUG=1 (show llama.cpp logs on stderr),
-#   LLAMA_SYSTEM (default system prompt; empty turns it off).
+# Env: HABITUS_LLAMA_MODEL (alias, default "default"),
+#   HABITUS_LLAMA_THREADS (default: physical cores), HABITUS_LLAMA_CTX
+#   (default 8192), HABITUS_LLAMA_NICE (default 10), HABITUS_LLAMA_MODEL_DIR,
+#   HABITUS_LLAMA_BIN (llama.cpp binaries), HABITUS_LLAMA_DEBUG=1 (show
+#   llama.cpp logs on stderr), HABITUS_LLAMA_SYSTEM (default system prompt;
+#   empty turns it off).
 
 set -euo pipefail
 IFS=$'\n\t'
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 CONF="$(dirname "$SELF")/../llama/models.conf"
-MODEL_DIR="${LLAMA_MODEL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/llama/models}"
-LLAMA_BIN="${LLAMA_BIN:-$HOME/.local/opt/llama.cpp/bin}"
+MODEL_DIR="${HABITUS_LLAMA_MODEL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/llama/models}"
+LLAMA_BIN="${HABITUS_LLAMA_BIN:-$HOME/.local/opt/llama.cpp/bin}"
 # Inference saturates every thread it is given; run it at lower priority so
 # the desktop stays responsive while it works.
-NICE="${LLAMA_NICE:-10}"
+NICE="${HABITUS_LLAMA_NICE:-10}"
 # Unprompted, the models pad every answer with headings, alternatives, and a
 # summary, and output length is what you wait for (~13 tok/s on a laptop CPU).
 # Asking for bare answers made small models guess wrong, so this keeps room for
@@ -78,8 +80,8 @@ tool() {
 }
 
 threads() {
-  if [[ -n "${LLAMA_THREADS:-}" ]]; then
-    printf '%s\n' "$LLAMA_THREADS"
+  if [[ -n "${HABITUS_LLAMA_THREADS:-}" ]]; then
+    printf '%s\n' "$HABITUS_LLAMA_THREADS"
     return
   fi
   local n
@@ -143,7 +145,7 @@ cmd_list() {
 }
 
 cmd_bench() {
-  load_model "${1:-${LLAMA_MODEL:-default}}"
+  load_model "${1:-${HABITUS_LLAMA_MODEL:-default}}"
   local bin
   bin="$(tool llama-bench)"
   "$bin" -m "$M_PATH" -t "$(threads)" -fa 1 -p 512 -n 128
@@ -214,7 +216,7 @@ main() {
   -h | --help) usage && return ;;
   esac
 
-  local alias="${LLAMA_MODEL:-default}" system="${LLAMA_SYSTEM-$SYSTEM_DEFAULT}"
+  local alias="${HABITUS_LLAMA_MODEL:-default}" system="${HABITUS_LLAMA_SYSTEM-$SYSTEM_DEFAULT}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
     -m | --model) alias="${2:?-m needs an alias}" && shift 2 ;;
@@ -227,7 +229,7 @@ main() {
   done
 
   load_model "$alias"
-  local common=(-m "$M_PATH" -t "$(threads)" -c "${LLAMA_CTX:-8192}" -fa on
+  local common=(-m "$M_PATH" -t "$(threads)" -c "${HABITUS_LLAMA_CTX:-8192}" -fa on
   "${M_ARGS[@]}")
   [[ -n "$system" ]] && common+=(-sys "$system")
 
@@ -256,7 +258,7 @@ main() {
 
   local bin log=/dev/null
   bin="$(tool llama-completion)"
-  [[ -n "${LLAMA_DEBUG:-}" ]] && log=/dev/stderr
+  [[ -n "${HABITUS_LLAMA_DEBUG:-}" ]] && log=/dev/stderr
   nice -n "$NICE" "$bin" "${common[@]}" -f "$tmp" -st --no-display-prompt \
     --no-warmup --simple-io </dev/null 2>"$log" | clean_stream
 }

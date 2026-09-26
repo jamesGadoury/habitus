@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build & install Ghostty terminal from source on Ubuntu, with desktop integration.
 # Usage: sudo ./install-ghostty.sh
-#   GHOSTTY_VERSION=1.3.1  ZIG_VERSION=0.15.2   override defaults
+#   HABITUS_GHOSTTY_VERSION=1.3.1  HABITUS_ZIG_VERSION=0.15.2   override defaults
 #
 # Why source: at time of writing Ghostty isn't packaged in Ubuntu 24.04;
 # Ubuntu 26.04 ships it but 24.04 does not. Source build is the
@@ -27,8 +27,8 @@ IFS=$'\n\t'
 
 [[ $EUID -ne 0 ]] && exec sudo -E "$0" "$@"
 
-GHOSTTY_VERSION="${GHOSTTY_VERSION:-1.3.1}"
-ZIG_VERSION="${ZIG_VERSION:-0.15.2}"
+GHOSTTY_VERSION="${HABITUS_GHOSTTY_VERSION:-1.3.1}"
+ZIG_VERSION="${HABITUS_ZIG_VERSION:-0.15.2}"
 
 # Project signing keys (verify against upstream docs before bumping)
 GHOSTTY_PUBKEY="RWQlAjJC23149WL2sEpT/l0QKy7hMIFhYdQOFy0Z7z7PbneUgvlsnYcV"

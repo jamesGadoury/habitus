@@ -2,9 +2,9 @@
 # Build & install llama.cpp from source for CPU inference, then pull the
 # default models used by the `llama` wrapper (shell/bin/llama).
 # Usage: ./install-llama-cpp.sh            (no sudo needed — installs under ~/.local)
-#   LLAMA_CPP_REF=b11193                    override the pinned release tag
-#   LLAMA_CPP_FORCE=1                       rebuild even if the ref is already installed
-#   LLAMA_CPP_NO_PULL=1                     skip downloading models
+#   HABITUS_LLAMA_CPP_REF=b11193       override the pinned release tag
+#   HABITUS_LLAMA_CPP_FORCE=1          rebuild even if the ref is already installed
+#   HABITUS_LLAMA_CPP_NO_PULL=1        skip downloading models
 #
 # Why source: GGML_NATIVE tunes the build for this CPU (AVX2/FMA/F16C, or
 # AVX-512 where present), which the generic release zips do not.
@@ -22,7 +22,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-LLAMA_CPP_REF="${LLAMA_CPP_REF:-b11193}"
+LLAMA_CPP_REF="${HABITUS_LLAMA_CPP_REF:-b11193}"
 REPO_URL="https://github.com/ggml-org/llama.cpp"
 SRC_DIR="$HOME/.local/src/llama.cpp"
 PREFIX="$HOME/.local/opt/llama.cpp"
@@ -46,7 +46,7 @@ for cmd in git cmake c++; do
   command -v "$cmd" >/dev/null 2>&1 || die "missing build dependency: $cmd"
 done
 
-if [[ -z "${LLAMA_CPP_FORCE:-}" && -f "$PREFIX/REF" && "$(cat "$PREFIX/REF")" == "$LLAMA_CPP_REF" ]]; then
+if [[ -z "${HABITUS_LLAMA_CPP_FORCE:-}" && -f "$PREFIX/REF" && "$(cat "$PREFIX/REF")" == "$LLAMA_CPP_REF" ]]; then
   say "llama.cpp $LLAMA_CPP_REF already installed in $PREFIX"
 else
   if [[ -d "$SRC_DIR/.git" ]]; then
@@ -92,7 +92,7 @@ for tool in "${TOOLS[@]}"; do
 done
 say "Symlinked tools into $BIN_LINK_DIR"
 
-if [[ -z "${LLAMA_CPP_NO_PULL:-}" ]]; then
+if [[ -z "${HABITUS_LLAMA_CPP_NO_PULL:-}" ]]; then
   "$WRAPPER" pull default smart
 fi
 say "Done. Try: llama \"say hi in three words\""

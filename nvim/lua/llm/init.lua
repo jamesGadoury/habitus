@@ -2,8 +2,8 @@
 --
 -- <Leader>aa opens a small menu; the answer streams into a markdown buffer on
 -- the right (see ui.lua), from where it can be copied back into the buffer the
--- question came from. The backend is the `llama` wrapper unless $OLLAMA_URL is
--- set (see backend.lua). Mappings live in plugins/llm.lua.
+-- question came from. The backend is the `llama` wrapper unless
+-- $HABITUS_OLLAMA_URL is set (see backend.lua). Mappings live in plugins/llm.lua.
 --
 -- The answer buffer is the conversation: after each answer it offers a new
 -- `── you ──` turn, and <C-s> (or <Leader>as, from anywhere) sends the whole

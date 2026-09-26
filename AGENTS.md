@@ -129,8 +129,9 @@ prompt; `llama` alone on a TTY opens an interactive chat (`llama-cli`).
 - `setup/install-llama-cpp.sh` builds llama.cpp from source with
   `GGML_NATIVE=ON` (static, only `llama-cli`/`llama-completion`/`llama-bench`)
   into `~/.local/opt/llama.cpp`, then pulls the models. No sudo. The tag is
-  pinned by `LLAMA_CPP_REF`; to bump it, change the default and rerun
-  (`$PREFIX/REF` makes reruns at the same ref a no-op).
+  pinned by the script's default for `HABITUS_LLAMA_CPP_REF`; to bump it,
+  change that default and rerun (`$PREFIX/REF` makes reruns at the same ref a
+  no-op).
 - `shell/llama/models.conf` is the source of truth for model aliases
   (`default` = Gemma 4 E2B, fast; `smart` = Qwen3.5-4B, slower) and per-model
   sampling args. Its header records the benchmark behind the choice. `llama pull`
@@ -145,7 +146,7 @@ prompt; `llama` alone on a TTY opens an interactive chat (`llama-cli`).
   needs the same check: run it across a few seeds and look for thinking.
 - A concise system prompt is on by default (`SYSTEM_DEFAULT`): unprompted,
   answers ran 200-550 words and a minute or more. `-s` replaces it,
-  `LLAMA_SYSTEM` sets it, and an empty value (`-s ''`) turns it off. Don't
+  `HABITUS_LLAMA_SYSTEM` sets it, and an empty value (`-s ''`) turns it off. Don't
   tighten it to "as brief as possible": the default model then guesses
   instead of working the answer out (a wrong curl flag, wrong arithmetic).
   The numbers are in the `models.conf` header. The Neovim module inherits it.
@@ -154,14 +155,15 @@ prompt; `llama` alone on a TTY opens an interactive chat (`llama-cli`).
   reasoning goes to stderr and the answer alone to stdout, all while streaming.
   `llama-cli` is only used for interactive chat because it prints a banner on
   stdout.
-- Inference runs under `nice -n ${LLAMA_NICE:-10}`. Generating saturates the 4
+- Inference runs under `nice -n ${HABITUS_LLAMA_NICE:-10}`. Generating saturates the 4
   cores it uses, which is expected, and the lower priority keeps the desktop
   responsive.
 - Stdin is read only when it is a pipe or regular file — an inherited open
   stdin (cron, editors, `&`) would otherwise block forever.
-- Wrapper env vars are `LLAMA_MODEL`, `LLAMA_THREADS`, `LLAMA_CTX`,
-  `LLAMA_NICE`, `LLAMA_MODEL_DIR`, `LLAMA_DEBUG`, `LLAMA_SYSTEM`. Do not introduce names under llama.cpp's
-  own `LLAMA_ARG_*`, `LLAMA_CACHE`, or `LLAMA_LOG_*`, which change its behavior.
+- Wrapper env vars are `HABITUS_LLAMA_MODEL`, `HABITUS_LLAMA_THREADS`,
+  `HABITUS_LLAMA_CTX`, `HABITUS_LLAMA_NICE`, `HABITUS_LLAMA_MODEL_DIR`,
+  `HABITUS_LLAMA_BIN`, `HABITUS_LLAMA_DEBUG`, `HABITUS_LLAMA_SYSTEM` (see
+  [Environment Variables](#environment-variables)).
 
 ## Neovim LLM (`<Leader>a`)
 
@@ -182,8 +184,9 @@ buffer are listed at the top of `llm/init.lua`.
 - Because the buffer is meant to be edited, its put-back keys avoid Vim's
   editing keys (`gA`/`gR`, not `A`/`R`).
 - **Backend:** the `llama` wrapper by default, so models and sampling stay in
-  `shell/llama/models.conf`. If `$OLLAMA_URL` is set and non-empty, requests go
-  to that Ollama server's `/api/chat` instead. `$OLLAMA_MODEL` picks the model;
+  `shell/llama/models.conf`. If `$HABITUS_OLLAMA_URL` is set and non-empty,
+  requests go to that Ollama server's `/api/chat` instead.
+  `$HABITUS_OLLAMA_MODEL` picks the model;
   if it is unset, the first model `/api/tags` lists is used. Set both
   per machine in `shell/local.d/`. The env is read on every request. The module
   deliberately does not use `$OLLAMA_HOST`, which the ollama CLI reads itself.
@@ -231,6 +234,18 @@ The orchestrator picks the file up automatically via the sorted glob. Files star
 - **Alias**: simple command shortcuts (`alias gs='git status'`)
 - **Function**: anything that needs arguments, logic, or local variables
 - **Script**: if it's long or standalone, place it in `bin/` and `chmod +x` it. `install.sh` symlinks it to `~/.local/bin`. Must have a shebang line (e.g., `#!/bin/sh`)
+
+## Environment Variables
+
+Every setting this repo invents is read from a `HABITUS_` name, with the tool
+it configures next: `HABITUS_LLAMA_MODEL`, `HABITUS_OLLAMA_URL`,
+`HABITUS_GHOSTTY_VERSION`. A bare `LLAMA_*` or `OLLAMA_*` sits in that tool's
+own namespace, where llama.cpp (`LLAMA_ARG_*`, `LLAMA_CACHE`, `LLAMA_LOG_*`) or
+ollama (`OLLAMA_HOST`) may already read it, or start to in a later release.
+
+The rule covers what a user sets, not a script's internal variables
+(`LLAMA_CPP_REF="${HABITUS_LLAMA_CPP_REF:-b11193}"` is fine). Variables other
+programs define (`HOME`, `XDG_*`, `EDITOR`, `NO_COLOR`) keep their names.
 
 ## Shell Compatibility Rules
 
