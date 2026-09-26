@@ -19,7 +19,8 @@ IFS=$'\n\t'
 # Runs on the target, possibly a remote POSIX sh: keep it POSIX. It is
 # shipped over ssh as its source text (see probe_src), so it must be
 # self-contained and its closing brace must be the first `}` in column 0.
-# Prints one line per socket: proto<TAB>address<TAB>port<TAB>process
+# Prints one line per socket: proto<TAB>address<TAB>port<TAB>pid<TAB>process
+# ("-" for pid and process when they are hidden)
 _ports_probe() {
   _protos=$1
   _sudo=0
@@ -46,14 +47,13 @@ _ports_probe() {
         i = match(local, /:[^:]*$/)
         addr = substr(local, 1, i - 1); port = substr(local, i + 1)
         gsub(/[][]/, "", addr)
-        proc = "-"
+        pid = "-"; name = "-"
         if (match($0, /users:\(\("[^"]*",pid=[0-9]+/)) {
           s = substr($0, RSTART + 9, RLENGTH - 9)
           name = s; sub(/".*/, "", name)
           pid = s; sub(/.*pid=/, "", pid)
-          proc = name "[" pid "]"
         }
-        print $1, addr, port, proc
+        print $1, addr, port, pid, name
       }'
   elif command -v netstat >/dev/null 2>&1; then
     # Proto Recv-Q Send-Q Local Foreign [State] [PID/Program]
@@ -65,18 +65,17 @@ _ports_probe() {
         local = $4
         i = match(local, /:[^:]*$/)
         addr = substr(local, 1, i - 1); port = substr(local, i + 1)
-        proc = "-"
+        pid = "-"; name = "-"
         # PID/Program may hold spaces ("812/sshd: /usr/sbi"), so find the
         # field that starts it rather than trusting $NF.
         for (f = 6; f <= NF; f++) {
           if ($f ~ /^[0-9]+\//) {
             pid = $f; sub(/\/.*/, "", pid)
             name = $f; sub(/^[0-9]+\//, "", name); sub(/:$/, "", name)
-            proc = name "[" pid "]"
             break
           }
         }
-        print proto, addr, port, proc
+        print proto, addr, port, pid, name
       }'
   else
     echo "ports: neither ss nor netstat found on target" >&2
@@ -138,13 +137,19 @@ fi
 # Sort by port, then proto, then address; drop exact duplicates. Not
 # `sort -u`: with keys it dedups on the keys alone and would merge two
 # processes listening on the same port.
-sorted=$(sort -t $'\t' -k3,3n -k1,1 -k2,2 -k4,4 <<<"$rows" | uniq)
+sorted=$(sort -t $'\t' -k3,3n -k1,1 -k2,2 -k4,4n -k5,5 <<<"$rows" | uniq)
 awk -F '\t' -v b="$bold" -v r="$reset" '
-  { p[NR] = $1; a[NR] = $2; n[NR] = $3; c[NR] = $4; if (length($2) > w) w = length($2) }
+  {
+    p[NR] = $1; a[NR] = $2; n[NR] = $3; d[NR] = $4; c[NR] = $5
+    if (length($2) > w) w = length($2)
+    if (length($4) > dw) dw = length($4)
+  }
   END {
     if (w < 7) w = 7
-    printf "%s%-5s  %-*s  %5s  %s%s\n", b, "PROTO", w, "ADDRESS", "PORT", "PROCESS", r
-    for (i = 1; i <= NR; i++) printf "%-5s  %-*s  %5s  %s\n", p[i], w, a[i], n[i], c[i]
+    if (dw < 3) dw = 3
+    printf "%s%-5s  %-*s  %5s  %*s  %s%s\n", b, "PROTO", w, "ADDRESS", "PORT", dw, "PID", "PROCESS", r
+    for (i = 1; i <= NR; i++)
+      printf "%-5s  %-*s  %5s  %*s  %s\n", p[i], w, a[i], n[i], dw, d[i], c[i]
   }' <<<"$sorted"
 
 if [[ "$use_sudo" = 0 && (-n "$dest" || $EUID -ne 0) ]] && grep -q $'\t-$' <<<"$sorted"; then
