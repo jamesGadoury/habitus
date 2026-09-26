@@ -278,8 +278,8 @@ end
 --- Prompt for a question; from visual mode the selection goes with it.
 function M.prompt()
   local ctx = context()
-  local hint = ctx.text and "Prompt (empty: send the selection alone): " or "Prompt: "
-  vim.ui.input({ prompt = hint }, function(input)
+  local title = ctx.text and "Prompt (empty: send the selection alone)" or "Prompt"
+  ui.input(title, function(input)
     if input == nil or (input == "" and not ctx.text) then return end
     M.ask(ctx, input)
   end)
@@ -318,13 +318,13 @@ function M.menu()
   local function add(text, fn) items[#items + 1] = { text = text, fn = fn } end
   if ctx.text then
     add("Ask about the selection…", function()
-      vim.ui.input({ prompt = "Prompt (empty: send the selection alone): " }, function(input)
+      ui.input("Prompt (empty: send the selection alone)", function(input)
         if input ~= nil then M.ask(ctx, input) end
       end)
     end)
   end
   add("Ask…", function()
-    vim.ui.input({ prompt = "Prompt: " }, function(input)
+    ui.input("Prompt", function(input)
       if input and input ~= "" then M.ask({ buf = ctx.buf, row = ctx.row, ft = ctx.ft }, input) end
     end)
   end)

@@ -211,6 +211,69 @@ function M.block_at_cursor(win)
   return vim.list_slice(lines, first, last)
 end
 
+--- Ask for a prompt in a float that wraps long text and grows taller as it
+--- fills, unlike vim.ui.input's one scrolling line. <CR> sends it; <S-CR> or
+--- <C-j> starts a new line; <C-c>, or <Esc> or q in normal mode, cancels, as
+--- does leaving the window.
+---@param title string
+---@param on_done fun(input: string?) nil when cancelled
+function M.input(title, on_done)
+  local width = math.min(100, vim.o.columns - 4)
+  local max_height = math.max(1, math.floor(vim.o.lines * 0.5))
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = 1,
+    row = math.floor(vim.o.lines * 0.2),
+    col = math.floor((vim.o.columns - width) / 2),
+    style = "minimal",
+    border = "rounded",
+    title = " " .. title .. " ",
+    title_pos = "center",
+  })
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true
+
+  local done = false
+  local function finish(input)
+    if done then return end
+    done = true
+    vim.cmd.stopinsert()
+    if vim.api.nvim_win_is_valid(win) then vim.api.nvim_win_close(win, true) end
+    -- After the float is gone, so the callback runs in the window it came from.
+    vim.schedule(function() on_done(input) end)
+  end
+
+  local function submit()
+    finish(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
+  end
+  local function newline() vim.api.nvim_put({ "", "" }, "c", false, true) end
+  local map = function(modes, lhs, fn) vim.keymap.set(modes, lhs, fn, { buffer = buf, nowait = true }) end
+  map({ "i", "n" }, "<CR>", submit)
+  map("i", "<S-CR>", newline)
+  map("i", "<C-j>", newline)
+  map({ "i", "n" }, "<C-c>", function() finish(nil) end)
+  map("n", "<Esc>", function() finish(nil) end)
+  map("n", "q", function() finish(nil) end)
+
+  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+    buffer = buf,
+    callback = function()
+      if not vim.api.nvim_win_is_valid(win) then return end
+      local height = vim.api.nvim_win_text_height(win, {}).all
+      vim.api.nvim_win_set_height(win, math.max(1, math.min(height, max_height)))
+    end,
+  })
+  vim.api.nvim_create_autocmd("WinLeave", {
+    buffer = buf,
+    once = true,
+    callback = function() finish(nil) end,
+  })
+  vim.cmd.startinsert()
+end
+
 --- Like answer_raw, but if the answer is nothing but one fenced block (the
 --- usual shape of "rewrite this code"), the code inside it.
 ---@param win integer
