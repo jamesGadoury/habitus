@@ -5,12 +5,20 @@
 -- question came from. The backend is the `llama` wrapper unless $OLLAMA_URL is
 -- set (see backend.lua). Mappings live in plugins/llm.lua.
 --
+-- The answer buffer is the conversation: after each answer it offers a new
+-- `── you ──` turn, and <C-s> (or <Leader>as, from anywhere) sends the whole
+-- buffer back to the model. Every part of it is editable, and the model sees
+-- the buffer as it is at send time -- a reworded question, a trimmed answer,
+-- a deleted turn. Typing into an empty one (<Leader>ao before asking
+-- anything) starts a conversation too.
+--
 -- In the answer buffer:
+--   <C-s>     send the conversation (normal or insert mode)
 --   <CR>      insert the code block (or paragraph) under the cursor below the source selection
---   A         insert the whole answer there
---   R         replace the source selection with the whole answer
---   {Visual}<CR> / {Visual}R   the same, with just the selected text
---   Y         copy the whole answer to the clipboard (plain `y` works for parts)
+--   gA        insert the answer (the one under the cursor, else the latest) there
+--   gR        replace the source selection with that answer
+--   {Visual}<CR> / {Visual}gR   the same, with just the selected text
+--   Y         copy that answer to the clipboard (plain `y` works for parts)
 --   <C-c>     stop generating          q   close the window
 --
 -- Closing the answer window (q, :q, :bd, …) stops generating; hiding it with
@@ -86,14 +94,33 @@ end
 ---@param level? integer
 local function notify(msg, level) vim.notify(msg, level or vim.log.levels.INFO, { title = "llm" }) end
 
+local function label() return backend.name() .. ":" .. backend.peek_model() end
+
+--- Open a new user turn at the end of the conversation, cursor-ready.
+local function reply_turn()
+  ui.trim_end()
+  ui.append("\n\n" .. ui.header(ui.YOU) .. "\n\n")
+end
+
+--- Stop the running request, if any.
+---@param reply boolean open a new user turn below the partial answer
+local function stop(reply)
+  if not state.job then return end
+  state.job.cancel()
+  state.job = nil
+  -- Bumping the id drops any output still in flight from the cancelled run.
+  state.id = state.id + 1
+  if reply then reply_turn() end
+  ui.status("■ " .. label() .. " · stopped")
+end
+
 --- Put lines from the answer back into the source buffer.
 ---@param lines string[]
 ---@param how "insert"|"replace"
 local function put(lines, how)
   local src = state.src
-  if not src or not vim.api.nvim_buf_is_valid(src.buf) then
-    return notify("the source buffer is gone", vim.log.levels.WARN)
-  end
+  if not src then return notify("no source buffer: this conversation was not started from one", vim.log.levels.WARN) end
+  if not vim.api.nvim_buf_is_valid(src.buf) then return notify("the source buffer is gone", vim.log.levels.WARN) end
   if vim.trim(table.concat(lines, "\n")) == "" then return notify("nothing to put", vim.log.levels.WARN) end
   local buf = src.buf
   local function mark(id) return vim.api.nvim_buf_get_extmark_by_id(buf, ns, id, {}) end
@@ -135,22 +162,92 @@ local function answer_maps(buf)
   local function map(mode, lhs, fn, desc) vim.keymap.set(mode, lhs, fn, { buffer = buf, desc = "llm: " .. desc }) end
   map("n", "<CR>", function() put(ui.block_at_cursor(0), "insert") end, "insert block under cursor")
   map("x", "<CR>", function() put(visual_lines(), "insert") end, "insert selection")
-  map("n", "A", function() put(ui.answer(), "insert") end, "insert whole answer")
-  map("n", "R", function() put(ui.answer(), "replace") end, "replace source selection with answer")
-  map("x", "R", function() put(visual_lines(), "replace") end, "replace source selection with this")
+  map("n", "gA", function() put(ui.answer(0), "insert") end, "insert the answer")
+  map("n", "gR", function() put(ui.answer(0), "replace") end, "replace source selection with the answer")
+  map("x", "gR", function() put(visual_lines(), "replace") end, "replace source selection with this")
   map("n", "Y", function()
-    local text = table.concat(ui.lines(), "\n")
+    local text = table.concat(ui.answer_raw(0), "\n")
     vim.fn.setreg('"', text)
     pcall(vim.fn.setreg, "+", text)
     notify "answer copied"
-  end, "copy whole answer")
+  end, "copy the answer")
+  map("n", "<C-s>", M.send, "send the conversation")
+  map("i", "<C-s>", function()
+    vim.cmd.stopinsert()
+    M.send()
+  end, "send the conversation")
   map("n", "<C-c>", M.cancel, "stop generating")
   map("n", "q", ui.close, "close")
 end
 
-local function label() return backend.name() .. ":" .. backend.peek_model() end
+--- Send the conversation in the answer buffer and stream the reply below it.
+--- The buffer is parsed afresh every time, so what the model sees is exactly
+--- what the buffer says, edits included.
+local function converse()
+  local turns = vim.tbl_filter(function(t) return #t.lines > 0 end, ui.turns())
+  local last = turns[#turns]
+  if not last or last.role ~= "user" then
+    return notify(("nothing to send: write under the last '%s' line"):format(ui.header(ui.YOU)), vim.log.levels.WARN)
+  end
+  local messages = vim.tbl_map(function(t) return { role = t.role, content = table.concat(t.lines, "\n") } end, turns)
 
---- Send a request and stream the answer into the answer window.
+  state.id = state.id + 1
+  local id = state.id
+  local win = ui.open()
+  ui.trim_end()
+  -- Having just sent from the answer window, you want to watch the reply:
+  -- park the cursor on the last line so ui.append follows the stream.
+  if vim.api.nvim_get_current_win() == win then
+    vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(ui.buf()), 0 })
+  end
+  ui.append("\n\n" .. ui.header(label()) .. "\n\n")
+
+  local what = last.lines[1]
+  if #last.lines > 1 then what = what .. "…" end
+  if vim.fn.strchars(what) > 60 then what = vim.fn.strcharpart(what, 0, 57) .. "…" end
+  local started = vim.uv.hrtime()
+  local function status(mark, hint)
+    ui.status(("%s %s · %s%s"):format(mark, label(), what, hint and " · " .. hint or ""))
+  end
+  local function finish(mark, hint)
+    state.job = nil
+    reply_turn()
+    status(mark, hint)
+  end
+
+  -- Models often open with a newline; the header already has its blank line.
+  local fresh = true
+  local job, err = backend.run(messages, function(chunk)
+    vim.schedule(function()
+      if id ~= state.id then return end
+      if fresh then
+        chunk = chunk:gsub("^%s+", "")
+        if chunk == "" then return end
+        fresh = false
+      end
+      ui.append(chunk)
+    end)
+  end, function(run_err)
+    vim.schedule(function()
+      if id ~= state.id then return end
+      local secs = ("%.1fs"):format((vim.uv.hrtime() - started) / 1e9)
+      if run_err then
+        finish("✗ " .. secs, "<C-s>/<Leader>as retry")
+        notify(run_err, vim.log.levels.ERROR)
+      else
+        finish("✓ " .. secs, "<C-s>/<Leader>as reply")
+      end
+    end)
+  end)
+  if not job then
+    finish("✗", "<C-s>/<Leader>as retry")
+    return notify(err or "could not start the request", vim.log.levels.ERROR)
+  end
+  state.job = job
+  status "⋯"
+end
+
+--- Start a new conversation and stream the answer into the answer window.
 ---@param ctx llm.Context
 ---@param prompt string may be empty when there is a selection
 function M.ask(ctx, prompt)
@@ -162,44 +259,20 @@ function M.ask(ctx, prompt)
   end
   if vim.trim(text) == "" then return end
 
-  M.cancel()
-  state.id = state.id + 1
-  local id = state.id
+  stop(false)
   state.src = anchor(ctx)
-
   ui.clear()
   answer_maps(ui.buf())
-  local win = ui.open()
-  vim.api.nvim_set_current_win(win)
-  local what = prompt ~= "" and prompt:gsub("\n.*", "…") or "(selection)"
-  if #what > 60 then what = what:sub(1, 57) .. "…" end
-  local started = vim.uv.hrtime()
-  local function status(mark) ui.status(("%s %s · %s"):format(mark, label(), what)) end
+  vim.api.nvim_set_current_win(ui.open())
+  ui.append(ui.header(ui.YOU) .. "\n\n" .. text)
+  converse()
+end
 
-  local job, err = backend.run(text, function(chunk)
-    vim.schedule(function()
-      if id == state.id then ui.append(chunk) end
-    end)
-  end, function(run_err)
-    vim.schedule(function()
-      if id ~= state.id then return end
-      state.job = nil
-      ui.trim()
-      local secs = ("%.1fs"):format((vim.uv.hrtime() - started) / 1e9)
-      if run_err then
-        status("✗ " .. secs)
-        notify(run_err, vim.log.levels.ERROR)
-      else
-        status("✓ " .. secs)
-      end
-    end)
-  end)
-  if not job then
-    status "✗"
-    return notify(err or "could not start the request", vim.log.levels.ERROR)
-  end
-  state.job = job
-  status "⋯"
+--- Send the conversation in the answer buffer, with whatever was edited or
+--- added to it, and stream the reply.
+function M.send()
+  if state.job then return notify("still answering; <C-c> stops it", vim.log.levels.WARN) end
+  converse()
 end
 
 --- Prompt for a question; from visual mode the selection goes with it.
@@ -212,14 +285,7 @@ function M.prompt()
   end)
 end
 
-function M.cancel()
-  if not state.job then return end
-  state.job.cancel()
-  state.job = nil
-  -- Bumping the id drops any output still in flight from the cancelled run.
-  state.id = state.id + 1
-  ui.status("■ " .. label() .. " · stopped")
-end
+function M.cancel() stop(true) end
 
 -- Set while the answer window is being hidden rather than closed.
 local hiding = false
@@ -276,7 +342,7 @@ end
 
 local group = vim.api.nvim_create_augroup("llm", { clear = true })
 
-vim.api.nvim_create_autocmd("VimLeavePre", { group = group, callback = function() M.cancel() end })
+vim.api.nvim_create_autocmd("VimLeavePre", { group = group, callback = function() stop(false) end })
 
 -- Closing the last window showing the answer stops the request.
 vim.api.nvim_create_autocmd("WinClosed", {
@@ -298,7 +364,8 @@ vim.api.nvim_create_autocmd("WinClosed", {
 vim.api.nvim_create_autocmd({ "BufUnload", "BufWipeout" }, {
   group = group,
   callback = function(args)
-    if state.job and ui.is_answer(args.buf) then M.cancel() end
+    -- No reply turn: the buffer is on its way out.
+    if state.job and ui.is_answer(args.buf) then stop(false) end
   end,
 })
 

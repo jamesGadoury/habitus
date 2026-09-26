@@ -168,10 +168,19 @@ prompt; `llama` alone on a TTY opens an interactive chat (`llama-cli`).
 `nvim/lua/llm/` sends a selection (with an optional prompt), or a bare prompt,
 to a model and streams the answer into a markdown scratch buffer (`llm://answer`)
 in a right split. It is an in-repo module, not a plugin; `nvim/lua/plugins/llm.lua`
-only adds the `<Leader>a` mappings (`aa` menu, `ap` ask, `ao` show/hide, `ax`
-stop, `am` model). The keys available in the answer buffer are listed at the
-top of `llm/init.lua`.
+only adds the `<Leader>a` mappings (`aa` menu, `ap` ask, `ao` show/hide, `as`
+send the conversation, `ax` stop, `am` model). The keys available in the answer
+buffer are listed at the top of `llm/init.lua`.
 
+- **The answer buffer is the conversation.** Turns sit under separator lines
+  (`── you ──`, `── <backend>:<model> ──`; `ui.header`). After each answer a new
+  `── you ──` turn is opened, and `<C-s>` (or `<Leader>as`) re-parses the
+  *whole buffer* and sends it, so any edit (a reworded question, a trimmed
+  answer) is what the model sees. There is no hidden history: `ui.turns()` on the buffer text is the only
+  source. Ollama gets real chat messages; `llama` is one-shot, so
+  `backend.lua` flattens earlier turns into the prompt as quoted context.
+- Because the buffer is meant to be edited, its put-back keys avoid Vim's
+  editing keys (`gA`/`gR`, not `A`/`R`).
 - **Backend:** the `llama` wrapper by default, so models and sampling stay in
   `shell/llama/models.conf`. If `$OLLAMA_URL` is set and non-empty, requests go
   to that Ollama server's `/api/chat` instead. `$OLLAMA_MODEL` picks the model;

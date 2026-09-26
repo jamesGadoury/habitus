@@ -1,12 +1,23 @@
 -- The answer window for the llm module: one reused scratch buffer, markdown so
 -- treesitter highlights it and code fences are easy to find, shown in a right
--- vsplit. It is an ordinary buffer, so plain `y` copies any part of an answer;
--- the buffer-local maps set up by init.lua only cover putting text back into
--- the buffer the question came from.
+-- vsplit. It holds the whole conversation as a transcript, each turn under a
+-- separator line (see M.header). It is an ordinary buffer: edit any of it,
+-- and the next send parses what is there, so the text is the conversation.
 
 local M = {}
 
 local NAME = "llm://answer"
+
+--- The name on the separator of the user's turns; any other name is a model.
+M.YOU = "you"
+
+local SEP_PAT = "^── (.+) ──$"
+
+--- The separator line that starts a turn. Its shape is one a model does not
+--- write on its own, so answer text is never mistaken for a turn boundary.
+---@param who string M.YOU, or the model that answered
+---@return string
+function M.header(who) return ("── %s ──"):format(who) end
 
 ---@return integer buf
 function M.buf()
@@ -56,6 +67,7 @@ function M.open()
   vim.wo[win].signcolumn = "no"
   vim.wo[win].conceallevel = 2
   vim.wo[win].winfixwidth = true
+  vim.fn.matchadd("Title", [[\v^── .+ ──$]], 10, -1, { window = win })
   return win
 end
 
@@ -89,10 +101,24 @@ function M.append(text)
   if follow then vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 }) end
 end
 
---- Drop blank lines at both ends once an answer is complete.
-function M.trim()
+--- Drop blank lines at the end of the buffer, so the next turn is appended
+--- one blank line below the text.
+function M.trim_end()
   local buf = M.buf()
-  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local n = vim.api.nvim_buf_line_count(buf)
+  local last = n
+  while last > 1 and vim.api.nvim_buf_get_lines(buf, last - 1, last, false)[1]:match "^%s*$" do
+    last = last - 1
+  end
+  if last < n then vim.api.nvim_buf_set_lines(buf, last, n, false, {}) end
+end
+
+---@return string[]
+function M.lines() return vim.api.nvim_buf_get_lines(M.buf(), 0, -1, false) end
+
+---@param lines string[]
+---@return string[] lines without blank lines at either end
+local function strip(lines)
   local first, last = 1, #lines
   while first <= last and lines[first]:match "^%s*$" do
     first = first + 1
@@ -100,20 +126,67 @@ function M.trim()
   while last >= first and lines[last]:match "^%s*$" do
     last = last - 1
   end
-  if first == 1 and last == #lines then return end
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.list_slice(lines, first, last))
+  return vim.list_slice(lines, first, last)
 end
 
+---@class llm.Turn
+---@field role "user"|"assistant"
+---@field first integer 1-based row of the first content line (the one below the separator)
+---@field last integer 1-based row of the last content line; first - 1 when there is none
+---@field lines string[] the content, without blank lines at either end
+
+--- The conversation as the buffer now reads. Text above the first separator
+--- (typed into an empty buffer, say) is a user turn.
+---@return llm.Turn[]
+function M.turns()
+  local lines = M.lines()
+  local turns, cur = {}, nil
+  for i, line in ipairs(lines) do
+    local who = line:match(SEP_PAT)
+    if who or not cur then
+      cur = {
+        role = (who == nil or who == M.YOU) and "user" or "assistant",
+        first = who and i + 1 or i,
+        last = i - 1,
+      }
+      turns[#turns + 1] = cur
+    end
+    if not who then cur.last = i end
+  end
+  for _, t in ipairs(turns) do
+    t.lines = strip(vim.list_slice(lines, t.first, t.last))
+  end
+  return turns
+end
+
+--- The model's answer the cursor is in (its separator counts), else the latest.
+---@param win integer
 ---@return string[]
-function M.lines() return vim.api.nvim_buf_get_lines(M.buf(), 0, -1, false) end
+function M.answer_raw(win)
+  local row = vim.api.nvim_win_get_cursor(win)[1]
+  local pick
+  for _, t in ipairs(M.turns()) do
+    if t.role == "assistant" and #t.lines > 0 then
+      pick = t
+      if row >= t.first - 1 and row <= t.last then break end
+    end
+  end
+  return pick and pick.lines or {}
+end
 
 --- The fenced code block the cursor is in (without its fences), else the
---- paragraph under the cursor.
+--- paragraph under the cursor. Only looks inside the cursor's turn.
 ---@param win integer
 ---@return string[]
 function M.block_at_cursor(win)
-  local lines = M.lines()
   local row = vim.api.nvim_win_get_cursor(win)[1]
+  local turn
+  for _, t in ipairs(M.turns()) do
+    if row >= t.first and row <= t.last then turn = t end
+  end
+  if not turn then return {} end
+  local lines = vim.list_slice(M.lines(), turn.first, turn.last)
+  row = row - turn.first + 1
 
   local open
   for i, line in ipairs(lines) do
@@ -138,11 +211,12 @@ function M.block_at_cursor(win)
   return vim.list_slice(lines, first, last)
 end
 
---- The whole answer; if it is nothing but one fenced block (the usual shape of
---- "rewrite this code"), the code inside it.
+--- Like answer_raw, but if the answer is nothing but one fenced block (the
+--- usual shape of "rewrite this code"), the code inside it.
+---@param win integer
 ---@return string[]
-function M.answer()
-  local lines = M.lines()
+function M.answer(win)
+  local lines = M.answer_raw(win)
   local fences = 0
   for _, line in ipairs(lines) do
     if line:match "^%s*```" then fences = fences + 1 end

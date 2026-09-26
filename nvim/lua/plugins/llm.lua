@@ -1,5 +1,6 @@
--- <Leader>a: ask a local model about the selection, or anything. The module is
--- nvim/lua/llm/ (no third-party plugin); this file only registers mappings, and
+-- <Leader>a: ask a local model about the selection, or anything, and reply to
+-- its answer with <Leader>as. The module is nvim/lua/llm/ (no third-party
+-- plugin); this file only registers mappings, and
 -- the module is required on first use, so startup pays nothing for it.
 
 ---@param fn string
@@ -22,6 +23,7 @@ return {
       maps[mode][prefix .. "p"] = { call "prompt", desc = mode == "x" and "Ask about selection" or "Ask" }
     end
     maps.n[prefix .. "o"] = { call "toggle", desc = "Show/hide answer" }
+    maps.n[prefix .. "s"] = { call "send", desc = "Send the conversation" }
     maps.n[prefix .. "x"] = { call "cancel", desc = "Stop generating" }
     maps.n[prefix .. "m"] = { call "pick_model", desc = "Pick model" }
   end,

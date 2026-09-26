@@ -122,25 +122,46 @@ local function spawn(cmd, stdin, on_stdout, on_exit)
   }
 end
 
---- Stream a completion for `text`. Callbacks run in a luv callback (fast
---- context): schedule before touching buffers.
----@param text string the whole user message
+---@class llm.Message
+---@field role "user"|"assistant"
+---@field content string
+
+--- One prompt for a backend that takes a single message. `llama` is one-shot
+--- (no chat state between calls), so earlier turns travel as quoted context.
+---@param messages llm.Message[]
+---@return string
+local function flatten(messages)
+  if #messages == 1 then return messages[1].content end
+  local parts = { "Our conversation so far:" }
+  for i = 1, #messages - 1 do
+    local m = messages[i]
+    parts[#parts + 1] = (m.role == "user" and "### User\n\n" or "### Assistant\n\n") .. m.content
+  end
+  parts[#parts + 1] = "Reply to my latest message:\n\n" .. messages[#messages].content
+  return table.concat(parts, "\n\n")
+end
+
+--- Stream the model's reply to a conversation. Callbacks run in a luv
+--- callback (fast context): schedule before touching buffers.
+---@param messages llm.Message[] oldest first; the last one is the user's
 ---@param on_chunk fun(text: string)
 ---@param on_done fun(err: string?)
 ---@return llm.Job? job
 ---@return string? err
-function M.run(text, on_chunk, on_done)
+function M.run(messages, on_chunk, on_done)
   local model, err = M.model()
   if not model then return nil, err end
 
   local url = ollama_url()
   if not url then
+    local text = flatten(messages)
     if vim.fn.executable "llama" == 0 then return nil, "`llama` is not on PATH (see shell/bin/llama)" end
     -- The message goes in argv, not stdin: libuv hands children a socketpair,
     -- and the wrapper only reads stdin when it is a pipe or a file -- its guard
     -- against hanging on an inherited, never-closing stdin, which a socket is
     -- indistinguishable from. The 8k context caps a message well below
-    -- Linux's 128 KiB per-argument limit.
+    -- Linux's 128 KiB per-argument limit; a conversation long enough to
+    -- approach it has overflowed the context already.
     return spawn({ "llama", "-m", model, "--", text }, nil, on_chunk, function(code, stderr)
       -- stderr also carries any <think> block the wrapper split off, so only
       -- surface it when the run actually failed.
@@ -151,7 +172,7 @@ function M.run(text, on_chunk, on_done)
   local body = vim.json.encode {
     model = model,
     stream = true,
-    messages = { { role = "user", content = text } },
+    messages = messages,
   }
   local partial, api_err = "", nil
   local function feed(line)
