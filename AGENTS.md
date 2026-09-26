@@ -113,6 +113,27 @@ prompt; `llama` alone on a TTY opens an interactive chat (`llama-cli`).
   `LLAMA_NICE`, `LLAMA_MODEL_DIR`, `LLAMA_DEBUG`. Do not introduce names under llama.cpp's
   own `LLAMA_ARG_*`, `LLAMA_CACHE`, or `LLAMA_LOG_*`, which change its behavior.
 
+## Neovim LLM (`<Leader>a`)
+
+`nvim/lua/llm/` sends a selection (with an optional prompt), or a bare prompt,
+to a model and streams the answer into a markdown scratch buffer (`llm://answer`)
+in a right split. It is an in-repo module, not a plugin; `nvim/lua/plugins/llm.lua`
+only adds the `<Leader>a` mappings (`aa` menu, `ap` ask, `ao` show/hide, `ax`
+stop, `am` model). The keys available in the answer buffer are listed at the
+top of `llm/init.lua`.
+
+- **Backend:** the `llama` wrapper by default, so models and sampling stay in
+  `shell/llama/models.conf`. If `$OLLAMA_URL` is set and non-empty, requests go
+  to that Ollama server's `/api/chat` instead. `$OLLAMA_MODEL` picks the model;
+  if it is unset, the first model `/api/tags` lists is used. Set both
+  per machine in `shell/local.d/`. The env is read on every request. The module
+  deliberately does not use `$OLLAMA_HOST`, which the ollama CLI reads itself.
+- **The message goes to `llama` in argv, not stdin.** libuv gives children a
+  socketpair, and the wrapper's stdin guard (above) correctly ignores sockets.
+- Requests run in their own process group (`detach`), and cancelling kills the
+  whole group. Signalling only the bash wrapper would leave `llama-completion`
+  running.
+
 ## Adding a New Topic File
 
 1. Create `topics/<name>.sh`

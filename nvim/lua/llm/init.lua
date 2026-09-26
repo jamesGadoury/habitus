@@ -1,0 +1,265 @@
+-- Ask a model about a selection, or just ask it something, from inside nvim.
+--
+-- <Leader>aa opens a small menu; the answer streams into a markdown buffer on
+-- the right (see ui.lua), from where it can be copied back into the buffer the
+-- question came from. The backend is the `llama` wrapper unless $OLLAMA_URL is
+-- set (see backend.lua). Mappings live in plugins/llm.lua.
+--
+-- In the answer buffer:
+--   <CR>      insert the code block (or paragraph) under the cursor below the source selection
+--   A         insert the whole answer there
+--   R         replace the source selection with the whole answer
+--   {Visual}<CR> / {Visual}R   the same, with just the selected text
+--   Y         copy the whole answer to the clipboard (plain `y` works for parts)
+--   <C-c>     stop generating          q   close the window
+
+local backend = require "llm.backend"
+local ui = require "llm.ui"
+
+local M = {}
+
+local ns = vim.api.nvim_create_namespace "llm"
+
+---@class llm.Source
+---@field buf integer
+---@field has_selection boolean
+---@field start integer extmark: start of the selection
+---@field stop integer extmark: end of the selection (exclusive)
+---@field after integer extmark: the line inserts go below
+
+---@type { job: llm.Job?, id: integer, src: llm.Source? }
+local state = { job = nil, id = 0, src = nil }
+
+---@class llm.Context
+---@field buf integer
+---@field row integer 0-based cursor row, the anchor when there is no selection
+---@field ft string
+---@field text string? the selected text
+---@field range integer[]? { start_row, start_col, end_row, end_col } 0-based, end exclusive
+
+--- Where the request comes from. Must run while visual mode is still active:
+--- it reads the selection, then leaves visual mode.
+---@return llm.Context
+local function context()
+  local buf = vim.api.nvim_get_current_buf()
+  local ctx = { buf = buf, row = vim.api.nvim_win_get_cursor(0)[1] - 1, ft = vim.bo[buf].filetype }
+  local mode = vim.fn.mode()
+  if not mode:match "^[vV\22]" then return ctx end
+
+  local p1, p2 = vim.fn.getpos "v", vim.fn.getpos "."
+  ctx.text = table.concat(vim.fn.getregion(p1, p2, { type = mode }), "\n")
+  local region = vim.fn.getregionpos(p1, p2, { type = mode })
+  local s, e = region[1][1], region[#region][2]
+  local srow, erow = s[2] - 1, e[2] - 1
+  local last_len = #vim.api.nvim_buf_get_lines(buf, erow, erow + 1, false)[1]
+  if mode == "v" then
+    -- getregionpos ends on the last byte of the last character, inclusive.
+    ctx.range = { srow, s[3] - 1, erow, math.min(e[3], last_len) }
+  else
+    -- Linewise; blockwise too, since a block cannot be replaced by free text.
+    ctx.range = { srow, 0, erow, last_len }
+  end
+  vim.api.nvim_feedkeys(vim.keycode "<Esc>", "nx", false)
+  return ctx
+end
+
+---@param ctx llm.Context
+---@return llm.Source
+local function anchor(ctx)
+  if state.src and vim.api.nvim_buf_is_valid(state.src.buf) then
+    vim.api.nvim_buf_clear_namespace(state.src.buf, ns, 0, -1)
+  end
+  local r = ctx.range or { ctx.row, 0, ctx.row, 0 }
+  return {
+    buf = ctx.buf,
+    has_selection = ctx.range ~= nil,
+    start = vim.api.nvim_buf_set_extmark(ctx.buf, ns, r[1], r[2], { right_gravity = false }),
+    stop = vim.api.nvim_buf_set_extmark(ctx.buf, ns, r[3], r[4], { right_gravity = true }),
+    after = vim.api.nvim_buf_set_extmark(ctx.buf, ns, r[3], 0, {}),
+  }
+end
+
+---@param msg string
+---@param level? integer
+local function notify(msg, level) vim.notify(msg, level or vim.log.levels.INFO, { title = "llm" }) end
+
+--- Put lines from the answer back into the source buffer.
+---@param lines string[]
+---@param how "insert"|"replace"
+local function put(lines, how)
+  local src = state.src
+  if not src or not vim.api.nvim_buf_is_valid(src.buf) then
+    return notify("the source buffer is gone", vim.log.levels.WARN)
+  end
+  if vim.trim(table.concat(lines, "\n")) == "" then return notify("nothing to put", vim.log.levels.WARN) end
+  local buf = src.buf
+  local function mark(id) return vim.api.nvim_buf_get_extmark_by_id(buf, ns, id, {}) end
+
+  if how == "replace" then
+    if not src.has_selection then
+      return notify("there was no selection to replace; use <CR> or A to insert", vim.log.levels.WARN)
+    end
+    local s, e = mark(src.start), mark(src.stop)
+    vim.api.nvim_buf_set_text(buf, s[1], s[2], e[1], e[2], lines)
+    -- Re-aim the marks at the new text, so a second R replaces it again.
+    local erow = s[1] + #lines - 1
+    local ecol = (#lines == 1 and s[2] or 0) + #lines[#lines]
+    vim.api.nvim_buf_set_extmark(buf, ns, erow, ecol, { id = src.stop, right_gravity = true })
+    -- The insert point only moves down: text already inserted below the
+    -- selection stays above whatever is inserted next.
+    if mark(src.after)[1] < erow then vim.api.nvim_buf_set_extmark(buf, ns, erow, 0, { id = src.after }) end
+    notify(("replaced the selection with %d line(s)"):format(#lines))
+  else
+    local row = mark(src.after)[1]
+    vim.api.nvim_buf_set_lines(buf, row + 1, row + 1, false, lines)
+    -- Further inserts go below this one, so they land in the order made.
+    vim.api.nvim_buf_set_extmark(buf, ns, row + #lines, 0, { id = src.after })
+    notify(("inserted %d line(s)"):format(#lines))
+  end
+end
+
+--- Text of the visual selection in the answer buffer, leaving visual mode.
+---@return string[]
+local function visual_lines()
+  local mode = vim.fn.mode()
+  local lines = vim.fn.getregion(vim.fn.getpos "v", vim.fn.getpos ".", { type = mode })
+  vim.api.nvim_feedkeys(vim.keycode "<Esc>", "nx", false)
+  return lines
+end
+
+---@param buf integer
+local function answer_maps(buf)
+  local function map(mode, lhs, fn, desc) vim.keymap.set(mode, lhs, fn, { buffer = buf, desc = "llm: " .. desc }) end
+  map("n", "<CR>", function() put(ui.block_at_cursor(0), "insert") end, "insert block under cursor")
+  map("x", "<CR>", function() put(visual_lines(), "insert") end, "insert selection")
+  map("n", "A", function() put(ui.answer(), "insert") end, "insert whole answer")
+  map("n", "R", function() put(ui.answer(), "replace") end, "replace source selection with answer")
+  map("x", "R", function() put(visual_lines(), "replace") end, "replace source selection with this")
+  map("n", "Y", function()
+    local text = table.concat(ui.lines(), "\n")
+    vim.fn.setreg('"', text)
+    pcall(vim.fn.setreg, "+", text)
+    notify "answer copied"
+  end, "copy whole answer")
+  map("n", "<C-c>", M.cancel, "stop generating")
+  map("n", "q", ui.close, "close")
+end
+
+local function label() return backend.name() .. ":" .. backend.peek_model() end
+
+--- Send a request and stream the answer into the answer window.
+---@param ctx llm.Context
+---@param prompt string may be empty when there is a selection
+function M.ask(ctx, prompt)
+  local text
+  if ctx.text and prompt ~= "" then
+    text = ("%s\n\n```%s\n%s\n```"):format(prompt, ctx.ft, ctx.text)
+  else
+    text = ctx.text or prompt
+  end
+  if vim.trim(text) == "" then return end
+
+  M.cancel()
+  state.id = state.id + 1
+  local id = state.id
+  state.src = anchor(ctx)
+
+  ui.clear()
+  answer_maps(ui.buf())
+  local win = ui.open()
+  vim.api.nvim_set_current_win(win)
+  local what = prompt ~= "" and prompt:gsub("\n.*", "…") or "(selection)"
+  if #what > 60 then what = what:sub(1, 57) .. "…" end
+  local started = vim.uv.hrtime()
+  local function status(mark) ui.status(("%s %s · %s"):format(mark, label(), what)) end
+
+  local job, err = backend.run(text, function(chunk)
+    vim.schedule(function()
+      if id == state.id then ui.append(chunk) end
+    end)
+  end, function(run_err)
+    vim.schedule(function()
+      if id ~= state.id then return end
+      state.job = nil
+      ui.trim()
+      local secs = ("%.1fs"):format((vim.uv.hrtime() - started) / 1e9)
+      if run_err then
+        status("✗ " .. secs)
+        notify(run_err, vim.log.levels.ERROR)
+      else
+        status("✓ " .. secs)
+      end
+    end)
+  end)
+  if not job then
+    status "✗"
+    return notify(err or "could not start the request", vim.log.levels.ERROR)
+  end
+  state.job = job
+  status "⋯"
+end
+
+--- Prompt for a question; from visual mode the selection goes with it.
+function M.prompt()
+  local ctx = context()
+  local hint = ctx.text and "Prompt (empty: send the selection alone): " or "Prompt: "
+  vim.ui.input({ prompt = hint }, function(input)
+    if input == nil or (input == "" and not ctx.text) then return end
+    M.ask(ctx, input)
+  end)
+end
+
+function M.cancel()
+  if not state.job then return end
+  state.job.cancel()
+  state.job = nil
+  -- Bumping the id drops any output still in flight from the cancelled run.
+  state.id = state.id + 1
+  ui.status("■ " .. label() .. " · stopped")
+end
+
+M.toggle = ui.toggle
+
+function M.pick_model()
+  local models, err = backend.models()
+  if not models then return notify(err or "could not list models", vim.log.levels.ERROR) end
+  vim.ui.select(models, { prompt = "Model (" .. backend.name() .. ")" }, function(choice)
+    if choice then backend.set_model(choice) end
+  end)
+end
+
+--- The <Leader>aa menu.
+function M.menu()
+  local ctx = context()
+  local items = {}
+  local function add(text, fn) items[#items + 1] = { text = text, fn = fn } end
+  if ctx.text then
+    add("Ask about the selection…", function()
+      vim.ui.input({ prompt = "Prompt (empty: send the selection alone): " }, function(input)
+        if input ~= nil then M.ask(ctx, input) end
+      end)
+    end)
+  end
+  add("Ask…", function()
+    vim.ui.input({ prompt = "Prompt: " }, function(input)
+      if input and input ~= "" then M.ask({ buf = ctx.buf, row = ctx.row, ft = ctx.ft }, input) end
+    end)
+  end)
+  add(ui.win() and "Hide the answer" or "Show the last answer", ui.toggle)
+  if state.job then add("Stop generating", M.cancel) end
+  add("Model: " .. label() .. " (change…)", M.pick_model)
+
+  vim.ui.select(items, {
+    prompt = "LLM",
+    format_item = function(item) return item.text end,
+  }, function(item)
+    if item then item.fn() end
+  end)
+end
+
+vim.api.nvim_create_autocmd("VimLeavePre", {
+  group = vim.api.nvim_create_augroup("llm", { clear = true }),
+  callback = function() M.cancel() end,
+})
+
+return M
