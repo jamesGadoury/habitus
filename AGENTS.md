@@ -143,6 +143,12 @@ prompt; `llama` alone on a TTY opens an interactive chat (`llama-cli`).
   always injects a system message; with the stock templates both models
   reasoned for minutes on a large share of prompts, even "hello". A new model
   needs the same check: run it across a few seeds and look for thinking.
+- A concise system prompt is on by default (`SYSTEM_DEFAULT`): unprompted,
+  answers ran 200-550 words and a minute or more. `-s` replaces it,
+  `LLAMA_SYSTEM` sets it, and an empty value (`-s ''`) turns it off. Don't
+  tighten it to "as brief as possible": the default model then guesses
+  instead of working the answer out (a wrong curl flag, wrong arithmetic).
+  The numbers are in the `models.conf` header. The Neovim module inherits it.
 - One-shot output goes through `llama-completion`. `clean_stream` drops the
   trailing `[end of text]`, and if the model opens a `<think>` block anyway, the
   reasoning goes to stderr and the answer alone to stdout, all while streaming.
@@ -154,7 +160,7 @@ prompt; `llama` alone on a TTY opens an interactive chat (`llama-cli`).
 - Stdin is read only when it is a pipe or regular file — an inherited open
   stdin (cron, editors, `&`) would otherwise block forever.
 - Wrapper env vars are `LLAMA_MODEL`, `LLAMA_THREADS`, `LLAMA_CTX`,
-  `LLAMA_NICE`, `LLAMA_MODEL_DIR`, `LLAMA_DEBUG`. Do not introduce names under llama.cpp's
+  `LLAMA_NICE`, `LLAMA_MODEL_DIR`, `LLAMA_DEBUG`, `LLAMA_SYSTEM`. Do not introduce names under llama.cpp's
   own `LLAMA_ARG_*`, `LLAMA_CACHE`, or `LLAMA_LOG_*`, which change its behavior.
 
 ## Neovim LLM (`<Leader>a`)

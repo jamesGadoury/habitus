@@ -10,14 +10,16 @@
 #   llama < prompt.txt                  stdin alone is the prompt
 #   llama                               interactive chat (TTY, no prompt)
 #   llama -m smart "..."                pick a model alias from models.conf
-#   llama -s "be terse" "..."           system prompt
+#   llama -s "be terse" "..."           system prompt (replaces the default)
+#   llama -s '' "..."                   no system prompt: long, worked answers
 #   llama pull [alias...|all]           download models (default: default)
 #   llama list                          show models and whether they are present
 #   llama bench [alias]                 measure prompt/generation speed here
 #
 # Env: LLAMA_MODEL (alias, default "default"), LLAMA_THREADS (default:
 #   physical cores), LLAMA_CTX (default 8192), LLAMA_NICE (default 10),
-#   LLAMA_MODEL_DIR, LLAMA_DEBUG=1 (show llama.cpp logs on stderr).
+#   LLAMA_MODEL_DIR, LLAMA_DEBUG=1 (show llama.cpp logs on stderr),
+#   LLAMA_SYSTEM (default system prompt; empty turns it off).
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -29,6 +31,11 @@ LLAMA_BIN="${LLAMA_BIN:-$HOME/.local/opt/llama.cpp/bin}"
 # Inference saturates every thread it is given; run it at lower priority so
 # the desktop stays responsive while it works.
 NICE="${LLAMA_NICE:-10}"
+# Unprompted, the models pad every answer with headings, alternatives, and a
+# summary, and output length is what you wait for (~13 tok/s on a laptop CPU).
+# Asking for bare answers made small models guess wrong, so this keeps room for
+# a short worked step. See the measurements in models.conf.
+SYSTEM_DEFAULT='Be concise: answer in a few sentences or one code block, with no headings, alternatives, or closing summary. Accuracy comes first — if the answer needs a short explanation or a worked step, include it.'
 tmp="" # prompt file; global so the EXIT trap can see it
 
 if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
@@ -207,11 +214,11 @@ main() {
   -h | --help) usage && return ;;
   esac
 
-  local alias="${LLAMA_MODEL:-default}" system=""
+  local alias="${LLAMA_MODEL:-default}" system="${LLAMA_SYSTEM-$SYSTEM_DEFAULT}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
     -m | --model) alias="${2:?-m needs an alias}" && shift 2 ;;
-    -s | --system) system="${2:?-s needs text}" && shift 2 ;;
+    -s | --system) system="${2?-s needs text}" && shift 2 ;;
     -h | --help) usage && return ;;
     --) shift && break ;;
     -*) die "unknown option $1 (see: llama --help)" ;;
