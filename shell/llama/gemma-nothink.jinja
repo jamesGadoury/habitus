@@ -1,0 +1,13 @@
+{#- Gemma 4 turns without the stock template's thinking triggers. llama-completion
+    always injects a system message (empty unless -sys is given); the stock
+    template then emits a system turn, after which the model opens
+    <|channel>thought on most prompts. Skipping empty messages fixes that. -#}
+{%- for message in messages %}
+{%- if message.content %}
+<|turn>{{ "model" if message.role == "assistant" else message.role }}
+{{ message.content }}<turn|>
+{% endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+<|turn>model
+{% endif %}

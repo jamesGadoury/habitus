@@ -88,14 +88,17 @@ prompt; `llama` alone on a TTY opens an interactive chat (`llama-cli`).
   pinned by `LLAMA_CPP_REF`; to bump it, change the default and rerun
   (`$PREFIX/REF` makes reruns at the same ref a no-op).
 - `shell/llama/models.conf` is the source of truth for model aliases
-  (`default`, `fast`, `tiny`) and per-model sampling args. `llama pull`
+  (`default` = Gemma 4 E2B, fast; `smart` = Qwen3.5-4B, slower) and per-model
+  sampling args. Its header records the benchmark behind the choice. `llama pull`
   downloads into `~/.local/share/llama/models` and verifies the sha256 that
   Hugging Face reports as `X-Linked-Etag`. To switch models, edit the line and
   `llama pull <alias>`; check speed with `llama bench <alias>`.
-- Thinking is forced off by `shell/llama/qwen-nothink.jinja`, which is passed
-  through `models.conf` (`{confdir}` expands to that directory). `llama-completion`
-  rejects `--chat-template-kwargs` and ignores `-rea off`. With the GGUF's own
-  template, Qwen3.5-4B reasoned for minutes on ~40% of prompts, even "hello".
+- Thinking is forced off by a per-model `shell/llama/*-nothink.jinja` template,
+  passed through `models.conf` (`{confdir}` expands to that directory).
+  `llama-completion` rejects `--chat-template-kwargs`, ignores `-rea off`, and
+  always injects a system message; with the stock templates both models
+  reasoned for minutes on a large share of prompts, even "hello". A new model
+  needs the same check: run it across a few seeds and look for thinking.
 - One-shot output goes through `llama-completion`. `clean_stream` drops the
   trailing `[end of text]`, and if the model opens a `<think>` block anyway, the
   reasoning goes to stderr and the answer alone to stdout, all while streaming.

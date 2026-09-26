@@ -93,6 +93,6 @@ done
 say "Symlinked tools into $BIN_LINK_DIR"
 
 if [[ -z "${LLAMA_CPP_NO_PULL:-}" ]]; then
-  "$WRAPPER" pull default fast
+  "$WRAPPER" pull default smart
 fi
 say "Done. Try: llama \"say hi in three words\""

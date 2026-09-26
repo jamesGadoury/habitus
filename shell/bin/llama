@@ -9,7 +9,7 @@
 #   git diff | llama "commit message"   stdin is appended to the prompt
 #   llama < prompt.txt                  stdin alone is the prompt
 #   llama                               interactive chat (TTY, no prompt)
-#   llama -m fast "..."                 pick a model alias from models.conf
+#   llama -m smart "..."                pick a model alias from models.conf
 #   llama -s "be terse" "..."           system prompt
 #   llama pull [alias...|all]           download models (default: default)
 #   llama list                          show models and whether they are present
