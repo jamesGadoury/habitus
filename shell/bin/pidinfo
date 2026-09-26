@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# pidinfo — show what a process is: command, owner, ancestry, unit, sockets
+#
+# Usage: pidinfo [OPTIONS] [SSH-DESTINATION] PID...
+#   -s, --sudo    Read other users' processes with `sudo -n` (exe, cwd, open
+#                 files and sockets are otherwise hidden for them).
+#                 Never prompts; falls back to an unprivileged view.
+#   -h, --help    Show this help message
+#
+# With no destination, looks on this host. Otherwise the destination is
+# anything ssh accepts (host, user@host, an ssh config alias): the first
+# argument that is not a number. The probe runs through `sh -s` there, so
+# the remote login shell can be anything. Linux targets only: most of the
+# detail comes from /proc and ss.
+set -euo pipefail
+IFS=$'\n\t'
+
+# Runs on the target, possibly a remote POSIX sh: keep it POSIX. It is
+# shipped over ssh as its source text (see probe_src), so it must be
+# self-contained and its closing brace must be the first `}` in column 0.
+# Usage: _pidinfo_probe SUDO PID...
+# Prints label<TAB>value lines; each process starts with "pid<TAB>N", and a
+# missing one is just "missing<TAB>N".
+_pidinfo_probe() {
+  _sudo=0
+  if [ "$1" = 1 ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+      :
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+      _sudo=1
+    else
+      printf 'pidinfo: sudo needs a password or is unavailable on %s; continuing without it\n' \
+        "$(hostname 2>/dev/null || echo target)" >&2
+    fi
+  fi
+  shift
+  # A function, not a "sudo -n" string: the caller's IFS may not split on spaces.
+  _run() { if [ "$_sudo" = 1 ]; then sudo -n "$@"; else "$@"; fi; }
+  _ps() { ps -o "$2=" -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'; }
+  _kv() { printf '%s\t%s\n' "$1" "${2:--}"; }
+
+  for _pid in "$@"; do
+    if [ ! -d "/proc/$_pid" ]; then
+      _kv missing "$_pid"
+      continue
+    fi
+    _kv pid "$_pid"
+    _kv name "$(_ps "$_pid" comm)"
+    _kv command "$(_ps "$_pid" args)"
+    _kv exe "$(_run readlink "/proc/$_pid/exe" 2>/dev/null)"
+    _kv cwd "$(_run readlink "/proc/$_pid/cwd" 2>/dev/null)"
+    _kv user "$(_ps "$_pid" user)"
+    _kv state "$(_ps "$_pid" stat)"
+    _kv started "$(_ps "$_pid" lstart) ($(_ps "$_pid" etime) ago)"
+    _kv cpu "$(_ps "$_pid" pcpu)%"
+    _kv memory "$(_ps "$_pid" rss | awk -v t="$(_ps "$_pid" nlwp)" '{
+      k = $1; split("KiB MiB GiB TiB", u); i = 1
+      while (k >= 1024 && i < 4) { k /= 1024; i++ }
+      printf (i == 1 ? "%d %s" : "%.1f %s"), k, u[i]
+      printf " resident, %s threads", t }')"
+
+    # One ps listing for both directions; pid and ppid first because a comm
+    # can contain spaces ("tmux: server").
+    _procs=$(ps -A -o pid= -o ppid= -o comm= 2>/dev/null)
+    _kv parents "$(printf '%s\n' "$_procs" | awk -v pid="$_pid" '
+      { p = $1; pp[p] = $2; sub(/^ *[0-9]+ +[0-9]+ /, ""); name[p] = $0 }
+      END {
+        for (p = pp[pid]; p != "" && p > 1; p = pp[p])
+          s = s (s == "" ? "" : " <- ") name[p] "[" p "]"
+        print (s == "" ? "init" : s)
+      }')"
+    _kv children "$(printf '%s\n' "$_procs" | awk -v pid="$_pid" -v max=8 '
+      $2 != pid { next }
+      { p = $1; sub(/^ *[0-9]+ +[0-9]+ /, "") }
+      ++n <= max { printf "%s%s[%s]", (n > 1 ? ", " : ""), $0, p }
+      END { if (n > max) printf ", and %d more", n - max }')"
+
+    # The innermost systemd unit or container scope, from the cgroup path.
+    _kv unit "$(awk -F/ '{ print $NF }' "/proc/$_pid/cgroup" 2>/dev/null | tail -n 1)"
+
+    if _fds=$(_run ls "/proc/$_pid/fd" 2>/dev/null); then
+      _kv files "$(printf '%s\n' "$_fds" | grep -c .) open"
+    else
+      _kv files ""
+    fi
+
+    # Without root, ss only names the pids of your own processes, so for
+    # anyone else's an empty answer would be a false "none".
+    if [ "$(_ps "$_pid" uid)" != "$(id -u)" ] && [ "$(id -u)" -ne 0 ] && [ "$_sudo" = 0 ]; then
+      _kv listening ""
+      _kv connected ""
+      _kv hidden 1
+    elif command -v ss >/dev/null 2>&1; then
+      _kv listening "$(_run ss -Hlntup 2>/dev/null | awk -v pat="pid=$_pid," '
+        index($0, pat) { printf "%s%s %s", (n++ ? ", " : ""), $1, $5 }')"
+      _kv connected "$(_run ss -Hntup state established 2>/dev/null |
+        grep -c "pid=$_pid,") established"
+    fi
+  done
+}
+
+usage() { sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; }
+
+pids=()
+use_sudo=0
+dest=
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  -s | --sudo) use_sudo=1 ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  -*)
+    printf 'pidinfo: unknown option: %s\n' "$1" >&2
+    exit 2
+    ;;
+  *)
+    if [[ "$1" =~ ^[0-9]+$ ]]; then
+      pids+=("$1")
+    elif [[ -z "$dest" ]]; then
+      dest=$1
+    else
+      printf 'pidinfo: not a pid: %s\n' "$1" >&2
+      exit 2
+    fi
+    ;;
+  esac
+  shift
+done
+[[ ${#pids[@]} -gt 0 ]] || {
+  usage >&2
+  exit 2
+}
+
+if [[ -z "$dest" ]]; then
+  rows=$(_pidinfo_probe "$use_sudo" "${pids[@]}")
+else
+  # BatchMode: fail instead of prompting for a password or passphrase.
+  # Not `declare -f`: bash rewrites nested functions with the non-POSIX
+  # `function` keyword, which dash rejects.
+  probe_src=$(sed -n '/^_pidinfo_probe() {$/,/^}$/p' "$0")
+  pid_list=$(
+    IFS=' '
+    echo "${pids[*]}"
+  )
+  rows=$(printf '%s\n_pidinfo_probe %s %s\n' "$probe_src" "$use_sudo" "$pid_list" |
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "$dest" sh -s)
+fi
+
+bold='' dim='' red='' reset=''
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  bold=$(tput bold 2>/dev/null || true)
+  dim=$(tput dim 2>/dev/null || true)
+  red=$(tput setaf 1 2>/dev/null || true)
+  reset=$(tput sgr0 2>/dev/null || true)
+fi
+
+where=${dest:+ on $dest}
+status=0 first=1 pid=
+while IFS=$'\t' read -r key value; do
+  case "$key" in
+  missing)
+    printf '%spidinfo: no process %s%s%s\n' "$red" "$value" "$where" "$reset" >&2
+    status=1
+    ;;
+  pid)
+    [[ "$first" = 1 ]] || echo
+    first=0 pid=$value
+    ;;
+  name) printf '%s%s[%s]%s%s\n' "$bold" "$value" "$pid" "$where" "$reset" ;;
+  hidden)
+    printf '%s(some details hidden: not your process; try --sudo)%s\n' "$dim" "$reset" >&2
+    ;;
+  *) printf '%s%-10s%s %s\n' "$bold" "$key" "$reset" "$value" ;;
+  esac
+done <<<"$rows"
+exit "$status"
