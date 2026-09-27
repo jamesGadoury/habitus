@@ -83,34 +83,52 @@ _nvim_validate_no_unmanaged() {
     esac
 }
 
+_nvim_lock_commits() {
+    # "name commit" per plugin, sorted. Branch is left out on purpose: lazy
+    # records a detached checkout's branch from the clone's origin/HEAD, which
+    # `git fetch` never updates, so an old clone keeps saying `master` after
+    # upstream renamed to `main`. It changes nothing about what is checked out.
+    sed -n 's/^ *"\([^"]*\)": { "branch": "[^"]*", "commit": "\([^"]*\)" }.*/\1 \2/p' "$1" | sort
+}
+
 _nvim_sync_plugins() {
-    # Bring this machine's plugin tree in line with the committed lockfile.
+    # Make this machine's plugins match nvim/lazy-lock.json exactly. The
+    # lockfile is the source of truth; this step never rewrites it with
+    # whatever a machine happens to have checked out.
     #
     # Needed because nothing else does it: at startup lazy.nvim only clones
-    # plugins whose directory is *missing*, and that install pipeline never
-    # looks at a plugin's remote or at lazy-lock.json. So a spec that changes
-    # repos under an unchanged directory name keeps serving the old checkout,
-    # and every machine drifts to whatever commit it happened to fetch. This
-    # is the step that makes `git pull` + install.sh enough on a second box.
+    # plugins whose directory is *missing*, and never moves an existing
+    # checkout. A `:Lazy update` on one box, or a spec that changes repos
+    # under the same directory name, leaves it off the lockfile for good.
     #
-    # All three verbs are required, in this order -- none subsumes another:
-    #   install  clones plugins that are absent (restore skips uninstalled
-    #            plugins entirely, so it cannot bootstrap a new one)
-    #   clean    drops directories no spec claims any more
-    #   restore  re-clones on a changed remote, then pins every plugin to
-    #            nvim/lazy-lock.json (install ignores the lockfile)
-    # The bang makes each one non-interactive and blocking, which is what
-    # makes them usable from a script at all.
+    # Two nvim runs, with the lockfile saved in between, because lazy's
+    # `install` and `clean` both end by rewriting the lockfile -- in memory
+    # and on disk -- from the current checkouts (so does the install lazy does
+    # at startup when a plugin is missing). A `restore` in the same process
+    # would then "restore" to the drift it was meant to undo.
+    #   1. install  clones absent plugins (restore skips uninstalled ones)
+    #      clean    drops directories no spec claims any more
+    #   2. put the saved lockfile back, then restore in a fresh process:
+    #      nothing is missing now, so the lock it reads is the real one. It
+    #      re-clones on a changed remote and checks out every locked commit.
+    # The bang makes each verb non-interactive and blocking.
     #
-    # On an already-synced machine this rewrites lazy-lock.json byte-for-byte,
-    # so it leaves the repo clean; a diff here means a plugin genuinely moved
-    # and is yours to review and commit.
+    # Afterwards the lockfile is left exactly as it was unless the plugin set
+    # really differs from it: a plugin added to or removed from the spec, or
+    # a locked commit that could not be checked out. Then the rewritten file
+    # stays, as a diff for you to review.
     if [ ! -x "$_nvim_dest" ]; then
         printf 'Neovim plugin sync: skipping (no %s)\n' "$_nvim_dest"
         return 0
     fi
     if [ ! -e "$_nvim_config_dir" ]; then
         printf 'Neovim plugin sync: skipping (no config at %s)\n' "$_nvim_config_dir"
+        return 0
+    fi
+    _nvim_lock="$_nvim_config_src/lazy-lock.json"
+    if [ ! -f "$_nvim_lock" ]; then
+        printf 'Neovim plugin sync: skipping (no %s)\n' "$_nvim_lock"
+        unset _nvim_lock
         return 0
     fi
 
@@ -120,17 +138,34 @@ _nvim_sync_plugins() {
     if command -v timeout >/dev/null 2>&1; then
         _nvim_timeout="timeout 900"
     fi
+    _nvim_saved="$(mktemp)"
+    cp "$_nvim_lock" "$_nvim_saved"
 
     printf "${HLT}Syncing neovim plugins to lazy-lock.json...${RST}\n"
     # Never fatal: an offline or rate-limited machine should still walk away
     # with a working nvim binary and config symlink from this step.
-    if $_nvim_timeout "$_nvim_dest" --headless \
-        "+Lazy! install" "+Lazy! clean" "+Lazy! restore" +qa; then
+    _nvim_ok=1
+    $_nvim_timeout "$_nvim_dest" --headless "+Lazy! install" "+Lazy! clean" +qa || _nvim_ok=0
+    cp "$_nvim_saved" "$_nvim_lock"
+    if [ "$_nvim_ok" = 1 ]; then
+        $_nvim_timeout "$_nvim_dest" --headless "+Lazy! restore" +qa || _nvim_ok=0
+    fi
+
+    if [ "$_nvim_ok" = 0 ]; then
+        cp "$_nvim_saved" "$_nvim_lock"
+        printf 'Neovim plugin sync failed; run :Lazy restore by hand. Continuing.\n' >&2
+    elif [ "$(_nvim_lock_commits "$_nvim_saved")" = "$(_nvim_lock_commits "$_nvim_lock")" ]; then
+        cp "$_nvim_saved" "$_nvim_lock"
         printf 'Neovim plugins synced\n'
     else
-        printf 'Neovim plugin sync failed; run :Lazy restore by hand. Continuing.\n' >&2
+        printf "${HLT}Neovim plugins differ from lazy-lock.json:${RST}\n" >&2
+        _nvim_lock_commits "$_nvim_saved" > "$_nvim_saved.commits"
+        _nvim_lock_commits "$_nvim_lock" | diff "$_nvim_saved.commits" - | sed -n 's/^[<>]/  &/p' >&2
+        printf '  (< lockfile, > installed) Review with git diff and commit if intended.\n' >&2
+        rm -f "$_nvim_saved.commits"
     fi
-    unset _nvim_timeout
+    rm -f "$_nvim_saved"
+    unset _nvim_timeout _nvim_lock _nvim_saved _nvim_ok
 }
 
 do_install() {
