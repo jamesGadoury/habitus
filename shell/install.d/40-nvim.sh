@@ -92,7 +92,9 @@ _nvim_lock_commits() {
 }
 
 _nvim_sync_plugins() {
-    # Make this machine's plugins match nvim/lazy-lock.json exactly. The
+    # Make this machine's plugins match nvim/lazy-lock.json exactly, and its
+    # Mason packages and treesitter parsers match the versions pinned in the
+    # repo (plugins/mason.lua; nvim-treesitter's lockfile). The
     # lockfile is the source of truth; this step never rewrites it with
     # whatever a machine happens to have checked out.
     #
@@ -151,9 +153,20 @@ _nvim_sync_plugins() {
         $_nvim_timeout "$_nvim_dest" --headless "+Lazy! restore" +qa || _nvim_ok=0
     fi
 
+    # 3. Mason packages to the versions pinned in plugins/mason.lua (and
+    #    uninstall any it doesn't list: mason-lspconfig enables every
+    #    installed server, so a leftover one changes behaviour), then rebuild
+    #    parsers whose revision differs from nvim-treesitter's own lockfile,
+    #    which the restore above may just have moved. Needs the pinned
+    #    plugins, hence its own process after the restore.
+    if [ "$_nvim_ok" = 1 ]; then
+        $_nvim_timeout "$_nvim_dest" --headless \
+            "+MasonToolsInstallSync" "+MasonToolsClean" "+TSUpdateSync" +qa || _nvim_ok=0
+    fi
+
     if [ "$_nvim_ok" = 0 ]; then
         cp "$_nvim_saved" "$_nvim_lock"
-        printf 'Neovim plugin sync failed; run :Lazy restore by hand. Continuing.\n' >&2
+        printf 'Neovim plugin sync failed; rerun install.sh, or in nvim run :Lazy restore, :MasonToolsInstallSync, :TSUpdateSync. Continuing.\n' >&2
     elif [ "$(_nvim_lock_commits "$_nvim_saved")" = "$(_nvim_lock_commits "$_nvim_lock")" ]; then
         cp "$_nvim_saved" "$_nvim_lock"
         printf 'Neovim plugins synced\n'
