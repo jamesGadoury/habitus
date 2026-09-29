@@ -11,7 +11,7 @@ return {
     -- Configuration table of features provided by AstroLSP
     features = {
       codelens = true, -- enable/disable codelens refresh on start
-      inlay_hints = true, -- enable/disable inlay hints on start
+      inlay_hints = false, -- off on start: <Leader>uh/uH toggle them, <Leader>uI shows one line
       semantic_tokens = true, -- enable/disable semantic token highlighting
     },
     -- customize lsp formatting options
@@ -136,6 +136,11 @@ return {
           "<cmd>ClangdSwitchSourceHeader<cr>",
           desc = "Switch header/source",
           cond = function(client) return client.name == "clangd" end,
+        },
+        ["<Leader>uI"] = {
+          function() require("inlay_line").toggle() end,
+          desc = "Toggle inlay hints (line)",
+          cond = "textDocument/inlayHint",
         },
         ["<Leader>uY"] = {
           function() require("astrolsp.toggles").buffer_semantic_tokens() end,
