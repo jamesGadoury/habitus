@@ -62,6 +62,7 @@ shell/
 ├── topics/*.sh         # Auto-sourced topic files, split by concern
 ├── python/             # Default Python env: pyproject.toml + uv.lock (.venv gitignored)
 ├── llama/models.conf   # Model aliases for the `llama` local-LLM wrapper (bin/llama)
+├── zsh-profile/.zshenv # Stand-in .zshenv that bin/zsh-profile points ZDOTDIR at to load zprof first
 └── local.d/*.sh        # Gitignored machine-specific overrides
 
 setup/               # Optional install scripts (Neovim's system deps, ghostty, llama.cpp, rpi-imager, capslock disable)

@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# zsh-profile — find out what makes zsh slow to start
+#
+# Use it when a new terminal or tmux window takes noticeably long to give you a
+# prompt. It shows which parts of your startup files (.zshenv, .zshrc and the
+# plugins and frameworks they load) the time goes to, and lets you check that
+# a change made startup faster.
+#
+# Usage: zsh-profile [OPTIONS]
+#   (no option)     The functions that took the most time, from zsh's own
+#                   profiler (zprof).
+#   -t, --trace     The slowest lines instead, by file:line. Also covers what
+#                   the function view can't see: top-level code, sourced files
+#                   and the commands inside $(...). Tracing slows every line,
+#                   so compare these times with each other, not with --runs.
+#   -r, --runs N    Time N startups (after one warm-up): min, median, mean, max.
+#   -n, --top N     Rows to show (default 20).
+#   -l, --login     Profile a login shell (adds .zprofile and .zlogin).
+#   -h, --help      Show this help message
+#
+# A typical session:
+#   zsh-profile -r 20     how slow is it? (the baseline)
+#   zsh-profile           which functions take the time
+#   zsh-profile -t        which lines, including sourced files and $(...)
+#   ...change your startup files...
+#   zsh-profile -r 20     did it help?
+#
+# Your startup files are never edited. What gets measured is `zsh -i -c :`:
+# the startup files, not the first prompt (precmd hooks, the theme). It
+# inherits this shell's environment, which a new terminal window may not have.
+set -euo pipefail
+IFS=$'\n\t'
+
+usage() { sed -n '2,/^$/s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+
+usage_error() {
+  printf 'zsh-profile: %s\n' "$1" >&2
+  exit 2
+}
+
+die() {
+  printf 'zsh-profile: %s\n' "$1" >&2
+  exit 1
+}
+
+heading() {
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    printf '%s%s%s\n' "$(tput bold 2>/dev/null || true)" "$1" "$(tput sgr0 2>/dev/null || true)"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+# Usage: profile_functions TOP ZSH_ARG...
+profile_functions() {
+  local top=$1
+  shift
+  # zprof has to be loaded before any startup file runs, without editing them:
+  # ZDOTDIR points zsh at a stand-in .zshenv (shell/zsh-profile/) that loads
+  # zprof, puts ZDOTDIR back and hands over to the real files.
+  local stub report
+  stub="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../zsh-profile"
+  [[ -r "$stub/.zshenv" ]] || die "missing $stub/.zshenv"
+
+  local -a env_args=("ZDOTDIR=$stub")
+  if [[ -n "${ZDOTDIR+set}" ]]; then
+    env_args+=("_ZSH_PROFILE_ZDOTDIR=$ZDOTDIR")
+  fi
+  # The report leaves on fd 3 so whatever the startup files print to stdout
+  # can be thrown away.
+  report=$(env "${env_args[@]}" zsh "$@" -c 'zprof >&3' 3>&1 >/dev/null)
+
+  heading "Functions by self time, one startup (ms)"
+  if [[ -z "$report" ]]; then
+    printf 'No functions ran during startup.\n'
+    return
+  fi
+  # The first block is the summary; the call graph follows a blank line.
+  awk -v n="$top" 'NF == 0 { exit } NR <= n + 2' <<<"$report"
+}
+
+# Usage: trace_lines TOP ZSH_ARG...
+trace_lines() {
+  local top=$1
+  shift
+  heading "Lines by self time, one traced startup (ms)"
+  # %D{%s.%6.} stamps each line to the microsecond. %x:%I is the file and line
+  # even inside a function, where the default %N:%i gives the function's name.
+  PS4=$'+%D{%s.%6.}\t%x:%I\t' zsh "$@" -x -c : 2>&1 >/dev/null |
+    awk '
+      # A subshell traces into the same stream, so its records can land in
+      # the middle of a line. Print one record per line: time, place, command.
+      {
+        line = $0
+        while (match(line, /\+[0-9]+\.[0-9]+\t[^\t]*\t/)) {
+          rec = substr(line, RSTART + 1, RLENGTH - 2)
+          line = substr(line, RSTART + RLENGTH)
+          end = match(line, /\+[0-9]+\.[0-9]+\t[^\t]*\t/) ? RSTART : length(line) + 1
+          print rec "\t" substr(line, 1, end - 1)
+          line = substr(line, end)
+        }
+      }' |
+    LC_ALL=C sort -t $'\t' -k1,1n -s |
+    awk '
+      # A line runs until the next one starts; add that gap to its place. A
+      # place shows its costliest command: for `x=$(cmd)` that is cmd.
+      BEGIN { FS = "\t" }
+      {
+        if (NR > 1) {
+          gap = $1 - start
+          self[place] += gap; runs[place]++
+          if (!(place in worst) || gap > worst[place]) { worst[place] = gap; cmd[place] = text }
+        }
+        start = $1; place = $2; text = substr($0, length($1) + length($2) + 3)
+      }
+      END { for (p in self) printf "%.3f\t%d\t%s\t%s\n", self[p] * 1000, runs[p], p, cmd[p] }' |
+    LC_ALL=C sort -t $'\t' -k1,1nr |
+    awk -v n="$top" '
+      # Reads every row, where `head` would stop early and fail the pipeline
+      # under pipefail. The rows sum to the whole traced startup.
+      function tilde(s, out, i) {
+        if (home == "") return s
+        while ((i = index(s, home "/")) > 0) {
+          out = out substr(s, 1, i - 1) "~"
+          s = substr(s, i + length(home))
+        }
+        return out s
+      }
+      BEGIN { FS = "\t"; home = ENVIRON["HOME"]; width = 4 }
+      { total += $1 }
+      NR <= n {
+        rows = NR; ms[NR] = $1; runs[NR] = $2
+        # Keep the end of a long path: the file name and line number.
+        p = tilde($3)
+        if (length(p) > 50) p = "..." substr(p, length(p) - 46)
+        place[NR] = p
+        if (length(p) > width) width = length(p)
+        c = tilde($4)
+        gsub(/[[:cntrl:]]/, " ", c)
+        if (length(c) > 60) c = substr(c, 1, 57) "..."
+        cmd[NR] = c
+      }
+      END {
+        printf "%8s  %5s  %-" width "s  %s\n", "ms", "runs", "line", "command"
+        for (i = 1; i <= rows; i++)
+          printf "%8.1f  %5d  %-" width "s  %s\n", ms[i], runs[i], place[i], cmd[i]
+        printf "\ntraced startup: %.1f ms\n", total
+      }'
+}
+
+# Usage: time_runs RUNS ZSH_ARG...
+time_runs() {
+  local runs=$1
+  shift
+  [[ -n "${EPOCHREALTIME:-}" ]] || die "--runs needs bash 5 or newer"
+  local i start end
+  local -a micros=()
+  zsh "$@" -c : >/dev/null 2>&1 || die "zsh exited with an error; run without --runs to see it"
+  for ((i = 0; i < runs; i++)); do
+    # Digits only: the separator in EPOCHREALTIME follows the locale.
+    start=${EPOCHREALTIME//[!0-9]/}
+    zsh "$@" -c : >/dev/null 2>&1
+    end=${EPOCHREALTIME//[!0-9]/}
+    micros+=("$((end - start))")
+  done
+  heading "Startup time over $runs runs, after 1 warm-up (ms)"
+  printf '%s\n' "${micros[@]}" | LC_ALL=C sort -n | awk '
+    { v[NR] = $1 / 1000; sum += v[NR] }
+    END {
+      median = NR % 2 ? v[(NR + 1) / 2] : (v[NR / 2] + v[NR / 2 + 1]) / 2
+      printf "min %.1f  median %.1f  mean %.1f  max %.1f\n", v[1], median, sum / NR, v[NR]
+    }'
+}
+
+main() {
+  local mode='' top=20 runs=''
+  local -a zsh_args=(-i)
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -t | --trace | -r | --runs)
+      local want=trace
+      [[ "$1" == -r || "$1" == --runs ]] && want=runs
+      [[ -z "$mode" || "$mode" == "$want" ]] || usage_error "--trace and --runs are separate modes"
+      mode=$want
+      if [[ "$want" == runs ]]; then
+        [[ $# -ge 2 ]] || usage_error "$1 needs a number"
+        runs=$2
+        shift
+      fi
+      ;;
+    -n | --top)
+      [[ $# -ge 2 ]] || usage_error "$1 needs a number"
+      top=$2
+      shift
+      ;;
+    -l | --login) zsh_args+=(-l) ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *) usage_error "unknown argument: $1" ;;
+    esac
+    shift
+  done
+  [[ "$top" =~ ^[1-9][0-9]*$ ]] || usage_error "--top needs a positive number, not '$top'"
+  if [[ "$mode" == runs && ! "$runs" =~ ^[1-9][0-9]*$ ]]; then
+    usage_error "--runs needs a positive number, not '$runs'"
+  fi
+  command -v zsh >/dev/null 2>&1 || die "zsh is not installed"
+
+  case "$mode" in
+  trace) trace_lines "$top" "${zsh_args[@]}" ;;
+  runs) time_runs "$runs" "${zsh_args[@]}" ;;
+  *) profile_functions "$top" "${zsh_args[@]}" ;;
+  esac
+}
+
+# Sourcing the file (to test a function) defines everything but runs nothing.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
