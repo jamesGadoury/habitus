@@ -18,6 +18,8 @@ This:
 - adds a source line for `shell/init.sh` to your rc file (bash/zsh/ksh)
 - symlinks `shell/bin/*` into `~/.local/bin`
 - symlinks `vim/vimrc` to `~/.vimrc` (if full vim is installed)
+- installs [fnm](https://github.com/Schniz/fnm) and the current Node LTS (with
+  its npm) as the default; rerun to pick up the newest patch release
 - downloads the neovim AppImage and symlinks `nvim/` to `~/.config/nvim`
 - adds an `[include]` directive in `~/.gitconfig` for `git/config`
 

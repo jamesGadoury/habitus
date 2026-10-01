@@ -119,6 +119,22 @@ Workflow:
 
 `init.sh` sources all `topics/*.sh` in sorted order, then all `local.d/*.sh`. It also ensures `~/.local/bin` is on `PATH`.
 
+## Node.js (`fnm`)
+
+`shell/install.d/35-node.sh` installs fnm (pinned, sha256-checked) to
+`~/.local/bin/fnm`, then makes the newest release of the Node line in
+`HABITUS_NODE_VERSION` (default set in the step) fnm's default.
+`shell/topics/node.sh` puts it on `PATH` and switches versions on `cd` into a
+directory with `.node-version`, `.nvmrc`, or a `package.json` `engines` field.
+
+- npm is the copy bundled with that Node. Upgrade Node, not npm: rerun
+  `install.sh` for the newest patch release; change the step's default (or set
+  `HABITUS_NODE_VERSION`) and rerun to move to a new major.
+- Keep the step numbered below `40-nvim`: Mason installs several language
+  servers with npm, so the step puts node on `PATH` for the rest of the
+  install run.
+- To bump fnm, change `_node_fnm_version` and both sha256 values in the step.
+
 ## Local LLM (`llama`)
 
 `shell/bin/llama` asks a local model a question **without a server**: every
