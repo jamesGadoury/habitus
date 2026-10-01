@@ -35,13 +35,21 @@ has_marker() {
 }
 
 remove_block() {
-    # Remove everything between (and including) the marker lines
+    # Remove everything between (and including) the marker lines, and the
+    # blank lines directly above the begin marker. 10-rc.sh writes one blank
+    # line above the block; leaving it behind added a blank line to the rc
+    # file on every reinstall. Dropping the whole run also clears the ones
+    # earlier installs left. Blank lines are held back until the next
+    # non-blank line shows whether they sit above the block.
     _rc="$1"
     _tmp="${_rc}.mgmt_tmp.$$"
     awk -v begin="$MARKER_BEGIN" -v end="$MARKER_END" '
-        $0 == begin { skip=1; next }
+        $0 == begin { blanks=0; skip=1; next }
         $0 == end   { skip=0; next }
-        !skip
+        skip        { next }
+        $0 == ""    { blanks++; next }
+                    { for (; blanks > 0; blanks--) print ""; print }
+        END         { for (; blanks > 0; blanks--) print "" }
     ' "$_rc" > "$_tmp"
     mv "$_tmp" "$_rc"
 }
