@@ -25,6 +25,12 @@ This:
 
 Open a new terminal to activate.
 
+`install.sh` never uses sudo, so it can't install the system packages
+Neovim's language servers and parsers rely on (unzip, a C compiler, python3
+venv, FUSE for the AppImage, ...). If it warns about missing tools, on
+Debian/Ubuntu run `sudo ./setup/install-nvim-deps.sh`, then rerun
+`./shell/install.sh`.
+
 To update after a `git pull`, re-run `./shell/install.sh`.
 
 To uninstall:
@@ -39,7 +45,7 @@ To uninstall:
 habitus/
 ├── git/             # Managed gitconfig (included from ~/.gitconfig)
 ├── nvim/            # AstroNvim config — symlinked to ~/.config/nvim
-├── setup/           # Optional installers: ghostty, rpi-imager, capslock disable
+├── setup/           # Optional installers: Neovim deps, ghostty, rpi-imager, capslock disable
 ├── shell/
 │   ├── bin/         # Standalone scripts → ~/.local/bin (e.g. system-eval)
 │   ├── topics/      # Auto-sourced aliases, functions, helpers
@@ -59,6 +65,7 @@ Anything in that directory is gitignored and sourced automatically by
 Run individually as needed:
 
 ```sh
+./setup/install-nvim-deps.sh      # system packages Neovim's Mason/parsers need (sudo)
 ./setup/install-ghostty.sh        # build ghostty terminal from source
 ./setup/install-rpi-imager.sh     # download Raspberry Pi imager AppImage
 ./setup/disable-capslock.sh --install   # remap Caps Lock off (XDG autostart)

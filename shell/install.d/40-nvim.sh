@@ -83,6 +83,43 @@ _nvim_validate_no_unmanaged() {
     esac
 }
 
+_nvim_check_deps() {
+    # Warn about missing system tools that plugin, Mason and parser installs
+    # need. Warn-only, like the vim and tmux steps: nvim still runs without
+    # them, and the sync below installs whatever it can. Mason's failures
+    # don't fail the sync, so this warning is the only sign of them here.
+    # setup/install-nvim-deps.sh installs these with sudo on Debian/Ubuntu.
+    _nvim_missing=""
+    for _nvim_cmd in git unzip make rg; do
+        command -v "$_nvim_cmd" >/dev/null 2>&1 || _nvim_missing="$_nvim_missing $_nvim_cmd"
+    done
+    # The AppImage's runtime mounts itself with fusermount (FUSE 3).
+    if ! command -v fusermount3 >/dev/null 2>&1 && ! command -v fusermount >/dev/null 2>&1; then
+        _nvim_missing="$_nvim_missing fusermount"
+    fi
+    # nvim-treesitter compiles parsers with the first of these it finds.
+    if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 &&
+        ! command -v clang >/dev/null 2>&1; then
+        _nvim_missing="$_nvim_missing cc"
+    fi
+    # Mason makes a venv per pypi package; Debian splits out the ensurepip
+    # module `python3 -m venv` needs, into python3-venv.
+    if ! command -v python3 >/dev/null 2>&1; then
+        _nvim_missing="$_nvim_missing python3"
+    elif ! python3 -c 'import ensurepip' >/dev/null 2>&1; then
+        _nvim_missing="$_nvim_missing python3-venv"
+    fi
+    unset _nvim_cmd
+
+    if [ -n "$_nvim_missing" ]; then
+        printf "${HLT}Missing tools Neovim's Mason packages and parsers need:%s${RST}\n" "$_nvim_missing" >&2
+        printf '  Debian/Ubuntu:  sudo %s/setup/install-nvim-deps.sh\n' "$REPO_DIR" >&2
+        printf '  Elsewhere, install them with your package manager.\n' >&2
+        printf '  Then rerun install.sh so Mason retries what failed.\n' >&2
+    fi
+    unset _nvim_missing
+}
+
 _nvim_lock_commits() {
     # "name commit" per plugin, sorted. Branch is left out on purpose: lazy
     # records a detached checkout's branch from the clone's origin/HEAD, which
@@ -231,13 +268,16 @@ do_install() {
         fi
         unset _url _tmp
 
-        # Verify AppImage runs; warn about FUSE if it doesn't
+        # Verify AppImage runs; warn about FUSE if it doesn't. The AppImage
+        # uses AppImage's static type2-runtime, which bundles libfuse, so it
+        # needs no libfuse2 -- only a fusermount binary (FUSE 3) and /dev/fuse.
         if ! "$_nvim_dest" --version >/dev/null 2>&1; then
             printf '\n'
-            printf "${HLT}Warning: nvim AppImage failed to run. You may need FUSE:${RST}\n" >&2
-            printf '  Ubuntu/Debian:  sudo apt install libfuse2\n' >&2
-            printf '  Fedora:         sudo dnf install fuse-libs\n' >&2
-            printf '  Arch:           sudo pacman -S fuse2\n' >&2
+            printf "${HLT}Warning: nvim AppImage failed to run. You may need FUSE 3 (fusermount):${RST}\n" >&2
+            printf '  Ubuntu/Debian:  sudo %s/setup/install-nvim-deps.sh\n' "$REPO_DIR" >&2
+            printf '  Fedora:         sudo dnf install fuse3\n' >&2
+            printf '  Arch:           sudo pacman -S fuse3\n' >&2
+            printf '  Without FUSE (e.g. in a container): APPIMAGE_EXTRACT_AND_RUN=1 nvim\n' >&2
             printf '\n'
         fi
     fi
@@ -259,6 +299,7 @@ do_install() {
     fi
 
     # Last: needs both the binary above and the config symlink just made.
+    _nvim_check_deps
     _nvim_sync_plugins
 }
 

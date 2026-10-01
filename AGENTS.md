@@ -64,7 +64,7 @@ shell/
 ├── llama/models.conf   # Model aliases for the `llama` local-LLM wrapper (bin/llama)
 └── local.d/*.sh        # Gitignored machine-specific overrides
 
-setup/               # Optional install scripts (ghostty, llama.cpp, rpi-imager, capslock disable)
+setup/               # Optional install scripts (Neovim's system deps, ghostty, llama.cpp, rpi-imager, capslock disable)
 vim/                 # Vim config (vimrc symlinked to ~/.vimrc)
 ```
 
@@ -134,6 +134,19 @@ directory with `.node-version`, `.nvmrc`, or a `package.json` `engines` field.
   servers with npm, so the step puts node on `PATH` for the rest of the
   install run.
 - To bump fnm, change `_node_fnm_version` and both sha256 values in the step.
+
+## Neovim System Dependencies
+
+`install.sh` runs without root, so it installs no system packages. Mason, the
+treesitter parsers and the AppImage still need some (unzip, a C compiler,
+python3 venv, fusermount from FUSE 3, ...): `40-nvim.sh`'s `_nvim_check_deps` warns about
+missing ones, and `setup/install-nvim-deps.sh` installs them with sudo on
+Debian/Ubuntu. Mason's install failures don't fail the sync, so that warning
+is the only place they surface during install.
+
+**Rule:** when a plugin or Mason package starts needing another system tool,
+add it to both: the package to the script's `PACKAGES` (with a line in its
+header saying what needs it), and the command to `_nvim_check_deps`.
 
 ## Local LLM (`llama`)
 
