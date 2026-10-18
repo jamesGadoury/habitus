@@ -66,6 +66,7 @@ shell/
 └── local.d/*.sh        # Gitignored machine-specific overrides
 
 setup/               # Optional install scripts (Neovim's system deps, ghostty, llama.cpp, rpi-imager, capslock disable)
+systemd/             # User manager drop-ins, symlinked into ~/.config/systemd/user.conf.d by 80-systemd
 vim/                 # Vim config (vimrc symlinked to ~/.vimrc)
 ```
 

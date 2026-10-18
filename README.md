@@ -22,6 +22,9 @@ This:
   its npm) as the default; rerun to pick up the newest patch release
 - downloads the neovim AppImage and symlinks `nvim/` to `~/.config/nvim`
 - adds an `[include]` directive in `~/.gitconfig` for `git/config`
+- on systemd hosts, sets the user manager's `DefaultOOMPolicy=continue`, so an
+  out-of-memory kill takes one process rather than its whole terminal or tmux
+  session (from the next login)
 
 Open a new terminal to activate.
 
@@ -51,6 +54,7 @@ habitus/
 │   ├── topics/      # Auto-sourced aliases, functions, helpers
 │   ├── python/      # Default uv-managed Python env (pyproject + lockfile)
 │   └── local.d/     # Machine-specific overrides (gitignored)
+├── systemd/         # User manager drop-in (OOM policy)
 └── vim/             # Vim config
 ```
 
