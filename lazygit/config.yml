@@ -15,10 +15,22 @@ git:
   # only here: plain `git diff` keeps git/config's `pager = cat`.
   # --paging=never is required; delta running its own pager breaks the view.
   # --hyperlinks makes line numbers clickable (opens that line in the editor).
+  # The two leading spaces in --line-numbers-left-format are room for the
+  # selection bar: since v0.66 lazygit marks the selected hunk in a focused
+  # diff with a 2-column bar at the left edge (not configurable), which
+  # otherwise covers the start of the line numbers.
+  #
+  # Line numbers show only when the diff is wider than 120 columns, i.e. in
+  # full screen (`+`) on a typical terminal: in the normal layout the diff gets
+  # two thirds of the width, and the numbers cost 11 columns of it. lazygit
+  # reruns the renderer with the new {{width}} when the screen mode changes.
+  # Below the threshold, the line-number columns shrink to the two spaces the
+  # bar needs. On a terminal wider than ~180 columns the normal layout
+  # crosses 120 too; raise the number if that's yours.
   diffRenderers:
-    - command: delta --{{colorScheme}} --paging=never --line-numbers --hyperlinks --hyperlinks-file-link-format="lazygit-edit://{path}:{line}"
+    - command: delta --{{colorScheme}} --paging=never --line-numbers {{if gt .width 120}}--line-numbers-left-format="  {nm:^4}⋮" --hyperlinks --hyperlinks-file-link-format="lazygit-edit://{path}:{line}"{{else}}--line-numbers-left-format="  " --line-numbers-right-format=""{{end}}
     - name: side-by-side
-      command: delta --{{colorScheme}} --paging=never --line-numbers --side-by-side
+      command: delta --{{colorScheme}} --paging=never --line-numbers --line-numbers-left-format="  {nm:^4}⋮" --side-by-side
     - type: rawGit
       name: plain git
   # Render :rocket: in commit messages as the emoji.
