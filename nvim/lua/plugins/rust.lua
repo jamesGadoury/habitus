@@ -93,6 +93,15 @@ return {
                 granularity = { group = "module" },
                 prefix = "self",
               },
+              -- rustaceanvim lists hover actions above the docs. The type
+              -- definition ones are a "Go to" line for every type anywhere in
+              -- the signature, including ones you never wrote (`Global` from
+              -- `Arc`, `Future` from `async fn`, `Sized`), so a function call
+              -- puts a dozen lines before its docs. `gy` jumps to a type.
+              -- Implementations, run and debug actions stay.
+              hover = {
+                actions = { gotoTypeDef = { enable = false } },
+              },
               inlayHints = {
                 closureReturnTypeHints = { enable = "with_block" },
                 lifetimeElisionHints = { enable = "skip_trivial", useParameterNames = true },
@@ -106,7 +115,7 @@ return {
       mappings = {
         n = {
           -- rustaceanvim's hover is the plain LSP hover plus actionable entries
-          -- (go to impl//debug); pressing K again focuses the float.
+          -- (implementations, run, debug); pressing K again focuses the float.
           K = {
             function() vim.cmd.RustLsp { "hover", "actions" } end,
             desc = "Hover symbol (with actions)",
