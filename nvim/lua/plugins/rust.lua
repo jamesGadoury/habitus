@@ -18,6 +18,8 @@
 --   [toolchain]
 --   components = ["rustfmt", "clippy", "rust-analyzer"]
 -- or on this machine only: rustup component add rust-analyzer --toolchain <ver>
+-- The death only shows up in lsp.log, so `check_rust_analyzer` below probes
+-- the proxy when a Rust file opens and warns with that command filled in.
 -- Formatting on save is already global (see astrolsp.lua) and rust-analyzer
 -- proxies it to the toolchain's rustfmt, so `rustfmt.toml` is honoured as-is.
 
@@ -25,6 +27,39 @@
 --- rather than the lspconfig `rust_analyzer` key; accept either.
 ---@param client vim.lsp.Client
 local function is_rust_analyzer(client) return (client.name:gsub("_", "-")) == "rust-analyzer" end
+
+-- rustaceanvim only checks that `rust-analyzer` is executable, which the
+-- rustup proxy always is, so a toolchain without the component fails silently.
+-- Run the proxy from the file's directory, where rustup resolves the same
+-- toolchain the server would get. Probe each directory once, and show each
+-- distinct error once (a missing component is the same message everywhere).
+local probed, warned = {}, {}
+---@param args vim.api.keyset.create_autocmd.callback_args
+local function check_rust_analyzer(args)
+  local file = vim.api.nvim_buf_get_name(args.buf)
+  local dir = file ~= "" and vim.fs.dirname(file) or nil
+  if not dir or probed[dir] or not vim.uv.fs_stat(dir) then return end
+  probed[dir] = true
+  -- Not on PATH at all: rustaceanvim reports that one itself.
+  if vim.fn.executable "rust-analyzer" ~= 1 then return end
+  vim.system({ "rust-analyzer", "--version" }, { cwd = dir, text = true }, function(res)
+    if res.code == 0 then return end
+    local err = vim.trim(res.stderr ~= "" and res.stderr or res.stdout or "")
+    if warned[err] then return end
+    warned[err] = true
+    local toolchain = err:match "toolchain '([^']+)'"
+    local fix = "rustup component add rust-analyzer" .. (toolchain and (" --toolchain " .. toolchain) or "")
+    vim.schedule(
+      function()
+        vim.notify(
+          ("rust-analyzer won't start:\n%s\n\nFix: %s"):format(err, fix),
+          vim.log.levels.WARN,
+          { title = "rust-analyzer" }
+        )
+      end
+    )
+  end)
+end
 
 ---@type LazySpec
 return {
@@ -158,6 +193,24 @@ return {
   {
     "mrcjkb/rustaceanvim",
     optional = true,
+    specs = {
+      {
+        "AstroNvim/astrocore",
+        ---@type AstroCoreOpts
+        opts = {
+          autocmds = {
+            rust_analyzer_check = {
+              {
+                event = "FileType",
+                pattern = "rust",
+                desc = "Warn when the toolchain has no rust-analyzer",
+                callback = check_rust_analyzer,
+              },
+            },
+          },
+        },
+      },
+    },
     opts = function(_, opts)
       opts.server = opts.server or {}
       local settings = require("astrolsp").lsp_opts("rust_analyzer").settings
