@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/jesseduffield/lazygit/master/schema/config.json
+#
+# lazygit config, symlinked to ~/.config/lazygit/config.yml by
+# shell/install.d/55-lazygit.sh. Only settings that differ from lazygit's
+# defaults live here; the full reference is docs/Config.md in the lazygit repo
+# (read it at the tag the install step pins, since keys get renamed).
+#
+# Colours are deliberately not set. When lazygit is opened from Neovim
+# (snacks.nvim, <Leader>gg), snacks appends its own config file after this one
+# with a theme built from the current colorscheme; outside Neovim, lazygit's
+# defaults follow the terminal palette.
+
+git:
+  # Cycle with `|`. delta is installed by the same step as lazygit and is used
+  # only here: plain `git diff` keeps git/config's `pager = cat`.
+  # --paging=never is required; delta running its own pager breaks the view.
+  # --hyperlinks makes line numbers clickable (opens that line in the editor).
+  diffRenderers:
+    - command: delta --{{colorScheme}} --paging=never --line-numbers --hyperlinks --hyperlinks-file-link-format="lazygit-edit://{path}:{line}"
+    - name: side-by-side
+      command: delta --{{colorScheme}} --paging=never --line-numbers --side-by-side
+    - type: rawGit
+      name: plain git
+  # Render :rocket: in commit messages as the emoji.
+  parseEmoji: true
+
+os:
+  # Inside Neovim this opens files in that session instead of a nested nvim;
+  # elsewhere it runs plain nvim. snacks sets the same value when it opens
+  # lazygit, so behaviour matches inside and outside the editor.
+  editPreset: nvim-remote
+
+update:
+  # The install step pins the version; the self-updater would undo that.
+  method: never
+
+gui:
+  nerdFontsVersion: "3"
+  showRandomTip: false
+  # "3↓ 1↑" against the base branch in the branches list.
+  showDivergenceFromBaseBranch: arrowAndNumber
+  # Fuzzy rather than substring matching when filtering a list with `/`.
+  filterMode: fuzzy

@@ -50,6 +50,9 @@ normally in conversation.
 git/
 └── config           # Managed gitconfig, included via [include] directive in ~/.gitconfig
 
+lazygit/
+└── config.yml       # lazygit config, symlinked to ~/.config/lazygit/config.yml by 55-lazygit
+
 nvim/                # Neovim (AstroNvim) config, symlinked to ~/.config/nvim
 └── assets/          # Static files plugins read at runtime (markdown preview page,
                      #   its Catppuccin stylesheet, and vendor/ browser libraries)
@@ -67,6 +70,7 @@ shell/
 
 setup/               # Optional install scripts (Neovim's system deps, ghostty, llama.cpp, rpi-imager, capslock disable)
 systemd/             # User manager drop-ins, symlinked into ~/.config/systemd/user.conf.d by 80-systemd
+tmux/                # tmux.conf, symlinked to ~/.tmux.conf by 60-tmux
 vim/                 # Vim config (vimrc symlinked to ~/.vimrc)
 ```
 
@@ -136,6 +140,25 @@ directory with `.node-version`, `.nvmrc`, or a `package.json` `engines` field.
   servers with npm, so the step puts node on `PATH` for the rest of the
   install run.
 - To bump fnm, change `_node_fnm_version` and both sha256 values in the step.
+
+## lazygit and delta
+
+`shell/install.d/55-lazygit.sh` installs pinned, sha256-checked lazygit and
+delta to `~/.local/bin` and symlinks `lazygit/config.yml` into place.
+
+- delta is installed only as lazygit's diff renderer. Its options are on the
+  `diffRenderers` command lines in `lazygit/config.yml`, not in a `[delta]`
+  section of `git/config`, which keeps `pager = cat` for plain git.
+- lazygit renames config keys between releases (`git.paging` →
+  `git.pagers` → `git.diffRenderers`). Check a key against `docs/Config.md`
+  at the pinned tag, not against `master` or examples found online.
+- Inside Neovim, snacks.nvim (`<Leader>gg`) appends its own config file after
+  ours, with a theme and `editPreset`. Colours stay out of our config so the
+  two don't fight.
+- Other lazygit or delta binaries on `PATH` are reported with a removal
+  command (and flagged if they come before `~/.local/bin`), but the step
+  doesn't stop. It can't remove them itself: that usually needs sudo.
+- To bump a tool, change its version and both sha256 values in the step.
 
 ## Neovim System Dependencies
 

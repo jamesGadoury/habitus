@@ -22,6 +22,9 @@ This:
   its npm) as the default; rerun to pick up the newest patch release
 - downloads the neovim AppImage and symlinks `nvim/` to `~/.config/nvim`
 - adds an `[include]` directive in `~/.gitconfig` for `git/config`
+- installs [lazygit](https://github.com/jesseduffield/lazygit) with
+  [delta](https://github.com/dandavison/delta) as its diff renderer, and
+  symlinks `lazygit/config.yml` to `~/.config/lazygit/config.yml`
 - on systemd hosts, sets the user manager's `DefaultOOMPolicy=continue`, so an
   out-of-memory kill takes one process rather than its whole terminal or tmux
   session (from the next login)
