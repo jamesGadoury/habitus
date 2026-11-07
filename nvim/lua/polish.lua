@@ -1,5 +1,5 @@
-if true then return end -- WARN: REMOVE THIS LINE TO ACTIVATE THIS FILE
+-- Runs last in the setup process (see init.lua): plain Lua that doesn't
+-- belong in a plugin spec.
 
--- This will run last in the setup process.
--- This is just pure lua so anything that doesn't
--- fit in the normal config locations above can go here
+-- Padded, outlined LSP popups; see lua/lsp_float.lua.
+require("lsp_float").setup()
