@@ -31,8 +31,8 @@ git:
     - command: delta --{{colorScheme}} --paging=never --line-numbers {{if gt .width 120}}--line-numbers-left-format="  {nm:^4}⋮" --hyperlinks --hyperlinks-file-link-format="lazygit-edit://{path}:{line}"{{else}}--line-numbers-left-format="  " --line-numbers-right-format=""{{end}}
     - name: side-by-side
       command: delta --{{colorScheme}} --paging=never --line-numbers --line-numbers-left-format="  {nm:^4}⋮" --side-by-side
-    - type: rawGit
-      name: plain git
+    # - type: rawGit
+    #   name: plain git
   # Render :rocket: in commit messages as the emoji.
   parseEmoji: true
 
