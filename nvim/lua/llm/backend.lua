@@ -10,13 +10,15 @@
 -- $HABITUS_LLM_SYSTEM replaces the system prompt; set but empty sends none.
 -- Thinking is off unless toggled on (M.toggle_thinking), for the session.
 -- The env is read on every call, so `:let $HABITUS_LLM_URL = "..."` switches
--- servers without a restart.
+-- servers without a restart. $OPENAI_BASE_URL/$OPENAI_API_KEY are deliberately
+-- not read: OpenAI's SDKs and other tools read them, and pointing those at a
+-- local server shouldn't also redirect this, or the reverse.
 
 local M = {}
 
--- Answers ran to hundreds of words without it, which on a small local model
--- means a minute or more per question. Don't tighten it to "as brief as
--- possible": small models then guess instead of working the answer out.
+-- Unprompted, models answer a one-line question with hundreds of words. Don't
+-- tighten it to "as brief as possible": small models then guess instead of
+-- working the answer out (a wrong flag, wrong arithmetic).
 local SYSTEM_DEFAULT = "Be concise: answer in a few sentences or one code block, with no headings, "
   .. "alternatives, or closing summary. Accuracy comes first — if the answer needs a short "
   .. "explanation or a worked step, include it."
@@ -28,7 +30,9 @@ local last = {}
 -- Sent as chat_template_kwargs.enable_thinking, which vLLM and llama-server
 -- hand to the chat template: Qwen-style templates read it, others ignore it.
 -- Off by default: a reasoning model otherwise spends most of a short answer's
--- time thinking.
+-- time thinking. Not reasoning_effort: "none" also turns thinking off on vLLM,
+-- but what its values mean differs from server to server. A server that
+-- rejects unknown fields (OpenAI's own API) refuses the request.
 local thinking = false
 
 ---@return boolean

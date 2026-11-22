@@ -89,6 +89,8 @@ _nvim_check_deps() {
     # them, and the sync below installs whatever it can. Mason's failures
     # don't fail the sync, so this warning is the only sign of them here.
     # setup/install-nvim-deps.sh installs these with sudo on Debian/Ubuntu.
+    # Keep the two in step: a tool a plugin or Mason package starts needing
+    # goes in both, its command here and its package in that script's PACKAGES.
     _nvim_missing=""
     for _nvim_cmd in git unzip make rg; do
         command -v "$_nvim_cmd" >/dev/null 2>&1 || _nvim_missing="$_nvim_missing $_nvim_cmd"

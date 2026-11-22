@@ -127,11 +127,11 @@ local function put(lines, how)
 
   if how == "replace" then
     if not src.has_selection then
-      return notify("there was no selection to replace; use <CR> or A to insert", vim.log.levels.WARN)
+      return notify("there was no selection to replace; use <CR> or gA to insert", vim.log.levels.WARN)
     end
     local s, e = mark(src.start), mark(src.stop)
     vim.api.nvim_buf_set_text(buf, s[1], s[2], e[1], e[2], lines)
-    -- Re-aim the marks at the new text, so a second R replaces it again.
+    -- Re-aim the marks at the new text, so a second gR replaces it again.
     local erow = s[1] + #lines - 1
     local ecol = (#lines == 1 and s[2] or 0) + #lines[#lines]
     vim.api.nvim_buf_set_extmark(buf, ns, erow, ecol, { id = src.stop, right_gravity = true })

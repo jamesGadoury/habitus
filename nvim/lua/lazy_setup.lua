@@ -1,3 +1,6 @@
+-- lazy-lock.json is committed: it pins every plugin to a commit, so every
+-- machine gets the same set and a bad update can be rolled back. After
+-- `:Lazy update`, commit the lock file once the update has been checked.
 require("lazy").setup({
   {
     "AstroNvim/AstroNvim",

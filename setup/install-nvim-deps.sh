@@ -22,6 +22,9 @@
 #                               them)
 #
 # Node and npm, for Mason's npm packages, come from install.d/35-node.sh.
+# Keep this list in step with _nvim_check_deps in install.d/40-nvim.sh: a new
+# tool goes in both, its package here (with a line above saying what needs it)
+# and its command there.
 # Rerun shell/install.sh as yourself afterwards so Mason retries what failed.
 #
 # Idempotent: apt-get skips packages that are already installed.

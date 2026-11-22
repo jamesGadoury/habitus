@@ -13,67 +13,19 @@ git clone https://github.com/<user>/habitus.git ~/workspaces/habitus
 ~/workspaces/habitus/shell/install.sh
 ```
 
-This:
+Then open a new terminal. `install.sh` runs the steps in `shell/install.d/` in
+order; each one says what it does in its header. It never uses sudo: when a
+step is missing a system package, it warns and prints how to install it.
 
-- adds a source line for `shell/init.sh` to your rc file (bash/zsh/ksh)
-- symlinks `shell/bin/*` into `~/.local/bin`
-- symlinks `vim/vimrc` to `~/.vimrc` (if full vim is installed)
-- installs [fnm](https://github.com/Schniz/fnm) and the current Node LTS (with
-  its npm) as the default; rerun to pick up the newest patch release
-- downloads the neovim AppImage and symlinks `nvim/` to `~/.config/nvim`
-- adds an `[include]` directive in `~/.gitconfig` for `git/config`
-- installs [lazygit](https://github.com/jesseduffield/lazygit) with
-  [delta](https://github.com/dandavison/delta) as its diff renderer, and
-  symlinks `lazygit/config.yml` to `~/.config/lazygit/config.yml`
-- on systemd hosts, sets the user manager's `DefaultOOMPolicy=continue`, so an
-  out-of-memory kill takes one process rather than its whole terminal or tmux
-  session (from the next login)
+Re-run `./shell/install.sh` after a `git pull` to update, and
+`./shell/install.sh --uninstall` to remove everything it set up.
 
-Open a new terminal to activate.
+## Per-machine config
 
-`install.sh` never uses sudo, so it can't install the system packages
-Neovim's language servers and parsers rely on (unzip, a C compiler, python3
-venv, FUSE for the AppImage, ...). If it warns about missing tools, on
-Debian/Ubuntu run `sudo ./setup/install-nvim-deps.sh`, then rerun
-`./shell/install.sh`.
+Shell files in `shell/local.d/*.sh` are gitignored and sourced after the topic
+files, so machine-specific settings (hosts, server URLs, model names) go there.
 
-To update after a `git pull`, re-run `./shell/install.sh`.
+## Optional installers
 
-To uninstall:
-
-```sh
-./shell/install.sh --uninstall
-```
-
-## What's inside
-
-```
-habitus/
-├── git/             # Managed gitconfig (included from ~/.gitconfig)
-├── nvim/            # AstroNvim config — symlinked to ~/.config/nvim
-├── setup/           # Optional installers: Neovim deps, ghostty, rpi-imager, capslock disable
-├── shell/
-│   ├── bin/         # Standalone scripts → ~/.local/bin (e.g. system-eval)
-│   ├── topics/      # Auto-sourced aliases, functions, helpers
-│   ├── python/      # Default uv-managed Python env (pyproject + lockfile)
-│   └── local.d/     # Machine-specific overrides (gitignored)
-├── systemd/         # User manager drop-in (OOM policy)
-└── vim/             # Vim config
-```
-
-## Per-machine extensions
-
-Drop any shell file into `shell/local.d/*.sh` to add machine-specific config.
-Anything in that directory is gitignored and sourced automatically by
-`init.sh` after the topic files.
-
-## Optional install scripts
-
-Run individually as needed:
-
-```sh
-./setup/install-nvim-deps.sh      # system packages Neovim's Mason/parsers need (sudo)
-./setup/install-ghostty.sh        # build ghostty terminal from source
-./setup/install-rpi-imager.sh     # download Raspberry Pi imager AppImage
-./setup/disable-capslock.sh --install   # remap Caps Lock off (XDG autostart)
-```
+`setup/` holds scripts that `install.sh` doesn't run, for things that need
+root or aren't wanted everywhere. Each says what it does in its header.
