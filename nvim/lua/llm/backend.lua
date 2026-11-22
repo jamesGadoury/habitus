@@ -1,211 +1,270 @@
--- Model backends for the llm module.
+-- Model backend for the llm module: any server that speaks the OpenAI chat
+-- completions API (llama-server, vLLM, LM Studio, a hosted API, ...).
 --
--- Default is the `llama` wrapper (shell/bin/llama): no server, every request
--- loads the GGUF and exits, and models/sampling live in shell/llama/models.conf
--- rather than here. When $HABITUS_OLLAMA_URL is set (and non-empty) requests go
--- to that Ollama server instead; $HABITUS_OLLAMA_MODEL picks the model, else the
--- first one the server lists. The env is read on every call, so
--- `:let $HABITUS_OLLAMA_URL = ""` switches back to llama without a restart.
---
--- Not $OLLAMA_HOST: the ollama CLI reads that for its own bind/client address,
--- and a machine running a local ollama would silently flip backends.
+-- $HABITUS_LLM_URL is the base URL including the version path, as OpenAI's
+-- SDKs take it (`http://<host>:<port>/v1`); requests go to /chat/completions and
+-- /models under it. The model is, first to last: the one picked from the menu,
+-- $HABITUS_LLM_MODEL, the one the server reports loaded, the one used last,
+-- the first one the server lists (see M.model). $HABITUS_LLM_API_KEY, if set,
+-- is sent as a bearer token.
+-- $HABITUS_LLM_SYSTEM replaces the system prompt; set but empty sends none.
+-- Thinking is off unless toggled on (M.toggle_thinking), for the session.
+-- The env is read on every call, so `:let $HABITUS_LLM_URL = "..."` switches
+-- servers without a restart.
 
 local M = {}
 
--- Model picked from the menu, per backend. nil means "backend default".
-local chosen = {}
--- First model /api/tags reported, per URL, so the fallback costs one request.
-local ollama_default = {}
+-- Answers ran to hundreds of words without it, which on a small local model
+-- means a minute or more per question. Don't tighten it to "as brief as
+-- possible": small models then guess instead of working the answer out.
+local SYSTEM_DEFAULT = "Be concise: answer in a few sentences or one code block, with no headings, "
+  .. "alternatives, or closing summary. Accuracy comes first — if the answer needs a short "
+  .. "explanation or a worked step, include it."
 
----@return string? url Ollama base URL without a trailing slash, or nil for llama
-local function ollama_url()
-  local url = vim.env.HABITUS_OLLAMA_URL
-  if not url or url == "" then return nil end
+-- Model picked from the menu, per server URL. nil means "pick one".
+local chosen = {}
+-- Model the last request used, per URL: the choice when none is loaded.
+local last = {}
+-- Sent as chat_template_kwargs.enable_thinking, which vLLM and llama-server
+-- hand to the chat template: Qwen-style templates read it, others ignore it.
+-- Off by default: a reasoning model otherwise spends most of a short answer's
+-- time thinking.
+local thinking = false
+
+---@return boolean
+function M.thinking() return thinking end
+
+---@return boolean on the new state
+function M.toggle_thinking()
+  thinking = not thinking
+  return thinking
+end
+
+--- Whether a server is set. Cheap, so the which-key label can call it every
+--- time the popup opens.
+---@return boolean
+function M.configured()
+  local url = vim.env.HABITUS_LLM_URL
+  return url ~= nil and url ~= ""
+end
+
+---@return string? url base URL without a trailing slash
+---@return string? err
+local function base_url()
+  local url = vim.env.HABITUS_LLM_URL
+  if not M.configured() then
+    return nil, "$HABITUS_LLM_URL is not set: point it at an OpenAI-compatible server (http://<host>:<port>/v1)"
+  end
   return (url:gsub("/+$", ""))
 end
 
----@return "llama"|"ollama"
-function M.name() return ollama_url() and "ollama" or "llama" end
-
---- Models the current backend can use.
----@return string[]? models
----@return string? err
-function M.models()
-  local url = ollama_url()
-  if url then
-    local res = vim.system({ "curl", "-sS", "--fail", "--max-time", "5", url .. "/api/tags" }, { text = true }):wait()
-    if res.code ~= 0 then return nil, ("GET %s/api/tags failed: %s"):format(url, vim.trim(res.stderr or "")) end
-    local ok, data = pcall(vim.json.decode, res.stdout)
-    if not ok or type(data) ~= "table" or type(data.models) ~= "table" then
-      return nil, "unexpected /api/tags response"
-    end
-    local names = {}
-    for _, m in ipairs(data.models) do
-      names[#names + 1] = m.name
-    end
-    return names
-  end
-
-  local res = vim.system({ "llama", "list" }, { text = true }):wait()
-  if res.code ~= 0 then return nil, vim.trim(res.stderr or "") end
-  local names = {}
-  for line in vim.gsplit(res.stdout, "\n", { trimempty = true }) do
-    local alias, state = line:match "^(%S+)%s+(%S+)"
-    -- `llama list` prints missing models too; offering one would just fail.
-    if alias and state ~= "missing" then names[#names + 1] = alias end
-  end
-  return names
+--- Request headers, fed to curl on stdin (`-H @-`) so the API key never
+--- appears in argv, where any local user can read it with ps.
+---@return string
+local function headers()
+  local h = "Content-Type: application/json\n"
+  local key = vim.env.HABITUS_LLM_API_KEY
+  if key and key ~= "" then h = h .. "Authorization: Bearer " .. key .. "\n" end
+  return h
 end
 
---- The model the next request will use, resolving Ollama's fallback if needed.
+--- The message out of an error body, in the shapes servers actually send:
+--- OpenAI's {error: {message}}, {error: "..."}, {message}, FastAPI's {detail}.
+---@param body string
+---@return string?
+local function error_message(body)
+  local ok, data = pcall(vim.json.decode, body)
+  if not ok or type(data) ~= "table" then return nil end
+  local e = data.error
+  if type(e) == "table" and type(e.message) == "string" then return e.message end
+  if type(e) == "string" then return e end
+  if type(data.message) == "string" then return data.message end
+  if type(data.detail) == "string" then return data.detail end
+  return nil
+end
+
+---@class llm.Model
+---@field id string
+---@field loaded boolean the server says it is in memory (llama-swap's status.value)
+
+--- Models the server offers, in the server's order.
+---@return llm.Model[]? models
+---@return string? err
+function M.models()
+  local url, err = base_url()
+  if not url then return nil, err end
+  local res = vim
+    .system({ "curl", "-sS", "--fail-with-body", "--connect-timeout", "2", "--max-time", "5", "-H", "@-", url .. "/models" }, {
+      stdin = headers(),
+      text = true,
+    })
+    :wait()
+  if res.code ~= 0 then
+    local msg = error_message(res.stdout or "") or vim.trim(res.stderr or "")
+    return nil, ("GET %s/models failed: %s"):format(url, msg)
+  end
+  local ok, data = pcall(vim.json.decode, res.stdout)
+  if not ok or type(data) ~= "table" or type(data.data) ~= "table" then return nil, "unexpected /models response" end
+  local models = {}
+  for _, m in ipairs(data.data) do
+    if type(m) == "table" and type(m.id) == "string" then
+      -- llama-swap lists every model it can start, loaded or not, and marks
+      -- each with status.value; other servers list only what they serve.
+      local loaded = type(m.status) == "table" and m.status.value == "loaded"
+      models[#models + 1] = { id = m.id, loaded = loaded }
+    end
+  end
+  return models
+end
+
+--- The model the next request will use. Without a pick or $HABITUS_LLM_MODEL
+--- it asks the server every time, because asking llama-swap for a model that
+--- isn't loaded makes it unload the running one and start that one: a swap
+--- costs a model load, so follow whatever the server has loaded right now.
 ---@return string? model
 ---@return string? err
 function M.model()
-  local name = M.name()
-  if chosen[name] then return chosen[name] end
-  if name == "llama" then return vim.env.HABITUS_LLAMA_MODEL or "default" end
+  local url, err = base_url()
+  if not url then return nil, err end
+  if chosen[url] then return chosen[url] end
+  local env = vim.env.HABITUS_LLM_MODEL
+  if env and env ~= "" then return env end
 
-  if vim.env.HABITUS_OLLAMA_MODEL and vim.env.HABITUS_OLLAMA_MODEL ~= "" then return vim.env.HABITUS_OLLAMA_MODEL end
-  local url = ollama_url() --[[@as string]]
-  if not ollama_default[url] then
-    local models, err = M.models()
-    if not models then return nil, err end
-    if #models == 0 then return nil, "the Ollama server at " .. url .. " has no models" end
-    ollama_default[url] = models[1]
+  local models, list_err = M.models()
+  if not models then return nil, list_err end
+  if #models == 0 then return nil, "the server at " .. url .. " lists no models" end
+  local pick, listed = nil, {}
+  for _, m in ipairs(models) do
+    listed[m.id] = true
+    -- Several can be loaded at once (llama-swap groups): stay on the last one.
+    if m.loaded and (not pick or m.id == last[url]) then pick = m.id end
   end
-  return ollama_default[url]
+  if not pick then pick = listed[last[url] or ""] and last[url] or models[1].id end
+  last[url] = pick
+  return pick
 end
 
 --- The model for display only: never makes a request, so a menu label cannot
 --- stall on an unreachable server.
 ---@return string
 function M.peek_model()
-  local name = M.name()
-  if chosen[name] then return chosen[name] end
-  if name == "llama" then return vim.env.HABITUS_LLAMA_MODEL or "default" end
-  if vim.env.HABITUS_OLLAMA_MODEL and vim.env.HABITUS_OLLAMA_MODEL ~= "" then return vim.env.HABITUS_OLLAMA_MODEL end
-  return ollama_default[ollama_url()] or "auto"
+  local url = base_url()
+  if not url then return "no server" end
+  if chosen[url] then return chosen[url] end
+  local env = vim.env.HABITUS_LLM_MODEL
+  if env and env ~= "" then return env end
+  return last[url] or "auto"
 end
 
 ---@param model string
-function M.set_model(model) chosen[M.name()] = model end
+function M.set_model(model)
+  local url = base_url()
+  if url then chosen[url] = model end
+end
 
 ---@class llm.Job
 ---@field cancel fun()
 
---- Start a process in its own process group, so cancel() reaches the whole
---- pipeline -- `llama` is a bash wrapper around `llama-completion | perl`, and
---- signalling only the wrapper would leave the model running.
----@param cmd string[]
----@param stdin string? nil gives the child /dev/null
----@param on_stdout fun(data: string)
----@param on_exit fun(code: integer, stderr: string)
----@return llm.Job? job
----@return string? err
-local function spawn(cmd, stdin, on_stdout, on_exit)
-  local stderr = {}
-  local ok, obj = pcall(vim.system, cmd, {
-    stdin = stdin or false,
-    detach = true,
-    stdout = function(_, data)
-      if data then on_stdout(data) end
-    end,
-    stderr = function(_, data)
-      if data then stderr[#stderr + 1] = data end
-    end,
-  }, function(res) on_exit(res.signal ~= 0 and 128 + res.signal or res.code, table.concat(stderr)) end)
-  if not ok then return nil, tostring(obj) end
-  return {
-    cancel = function()
-      if not pcall(vim.uv.kill, -obj.pid, "sigterm") then pcall(obj.kill, obj, "sigterm") end
-    end,
-  }
-end
-
 ---@class llm.Message
----@field role "user"|"assistant"
+---@field role "system"|"user"|"assistant"
 ---@field content string
-
---- One prompt for a backend that takes a single message. `llama` is one-shot
---- (no chat state between calls), so earlier turns travel as quoted context.
----@param messages llm.Message[]
----@return string
-local function flatten(messages)
-  if #messages == 1 then return messages[1].content end
-  local parts = { "Our conversation so far:" }
-  for i = 1, #messages - 1 do
-    local m = messages[i]
-    parts[#parts + 1] = (m.role == "user" and "### User\n\n" or "### Assistant\n\n") .. m.content
-  end
-  parts[#parts + 1] = "Reply to my latest message:\n\n" .. messages[#messages].content
-  return table.concat(parts, "\n\n")
-end
 
 --- Stream the model's reply to a conversation. Callbacks run in a luv
 --- callback (fast context): schedule before touching buffers.
+---@param model string from M.model(), resolved by the caller so it can label the answer
 ---@param messages llm.Message[] oldest first; the last one is the user's
----@param on_chunk fun(text: string)
+---@param on_chunk fun(text: string) the answer
 ---@param on_done fun(err: string?)
+---@param on_reasoning? fun(text: string) the model thinking, never shown as the answer
 ---@return llm.Job? job
 ---@return string? err
-function M.run(messages, on_chunk, on_done)
-  local model, err = M.model()
-  if not model then return nil, err end
+function M.run(model, messages, on_chunk, on_done, on_reasoning)
+  local url, url_err = base_url()
+  if not url then return nil, url_err end
 
-  local url = ollama_url()
-  if not url then
-    local text = flatten(messages)
-    if vim.fn.executable "llama" == 0 then return nil, "`llama` is not on PATH (see shell/bin/llama)" end
-    -- The message goes in argv, not stdin: libuv hands children a socketpair,
-    -- and the wrapper only reads stdin when it is a pipe or a file -- its guard
-    -- against hanging on an inherited, never-closing stdin, which a socket is
-    -- indistinguishable from. The 8k context caps a message well below
-    -- Linux's 128 KiB per-argument limit; a conversation long enough to
-    -- approach it has overflowed the context already.
-    return spawn({ "llama", "-m", model, "--", text }, nil, on_chunk, function(code, stderr)
-      -- stderr also carries any <think> block the wrapper split off, so only
-      -- surface it when the run actually failed.
-      on_done(code ~= 0 and ("llama exited %d: %s"):format(code, vim.trim(stderr)) or nil)
-    end)
-  end
+  -- os_getenv, not vim.env: vim.env reads an empty variable as unset, and
+  -- empty is how you turn the system prompt off.
+  local system = vim.uv.os_getenv "HABITUS_LLM_SYSTEM" or SYSTEM_DEFAULT
+  local all = {}
+  if system ~= "" then all[1] = { role = "system", content = system } end
+  vim.list_extend(all, messages)
 
-  local body = vim.json.encode {
+  -- The body goes in a file because stdin carries the headers. tempname()
+  -- lives in a directory only this user can read.
+  local body_file = vim.fn.tempname()
+  local f, open_err = io.open(body_file, "wb")
+  if not f then return nil, "could not write the request: " .. tostring(open_err) end
+  f:write(vim.json.encode {
     model = model,
     stream = true,
-    messages = messages,
-  }
-  local partial, api_err = "", nil
+    messages = all,
+    chat_template_kwargs = { enable_thinking = thinking },
+  })
+  f:close()
+
+  local partial, api_err, rest = "", nil, {}
   local function feed(line)
-    if line == "" then return end
-    local ok, msg = pcall(vim.json.decode, line)
+    line = line:gsub("\r$", "")
+    local payload = line:match "^data:%s*(.*)$"
+    if not payload then
+      -- Not an SSE event: an error body from --fail-with-body, or an SSE
+      -- comment/blank line, which only matters if the run fails.
+      if line ~= "" then rest[#rest + 1] = line end
+      return
+    end
+    if payload == "[DONE]" then return end
+    local ok, msg = pcall(vim.json.decode, payload)
     if not ok or type(msg) ~= "table" then return end
     if msg.error then
-      api_err = tostring(msg.error)
-    elseif type(msg.message) == "table" and type(msg.message.content) == "string" and msg.message.content ~= "" then
-      on_chunk(msg.message.content)
+      api_err = error_message(payload) or vim.inspect(msg.error)
+      return
     end
+    local choice = type(msg.choices) == "table" and msg.choices[1]
+    local delta = type(choice) == "table" and choice.delta
+    if type(delta) ~= "table" then return end
+    -- delta.reasoning (vLLM) / delta.reasoning_content (llama-server) is the
+    -- model thinking: reported, but kept out of the answer.
+    local reasoning = delta.reasoning or delta.reasoning_content
+    if on_reasoning and type(reasoning) == "string" and reasoning ~= "" then on_reasoning(reasoning) end
+    if type(delta.content) == "string" and delta.content ~= "" then on_chunk(delta.content) end
   end
-  local curl = { "curl", "-sS", "-N", "--fail-with-body", "-H", "Content-Type: application/json" }
-  vim.list_extend(curl, { "--data-binary", "@-", url .. "/api/chat" })
-  return spawn(curl, body, function(data)
-    -- NDJSON, but chunk boundaries fall anywhere: hold the unfinished tail.
-    partial = partial .. data
-    while true do
-      local nl = partial:find("\n", 1, true)
-      if not nl then break end
-      feed(partial:sub(1, nl - 1))
-      partial = partial:sub(nl + 1)
-    end
-  end, function(code, stderr)
+
+  local cmd = { "curl", "-sS", "-N", "--fail-with-body", "-H", "@-", "--data-binary", "@" .. body_file }
+  cmd[#cmd + 1] = url .. "/chat/completions"
+  local ok, obj = pcall(vim.system, cmd, {
+    stdin = headers(),
+    stdout = function(_, data)
+      if not data then return end
+      -- SSE, but chunk boundaries fall anywhere: hold the unfinished tail.
+      partial = partial .. data
+      while true do
+        local nl = partial:find("\n", 1, true)
+        if not nl then break end
+        feed(partial:sub(1, nl - 1))
+        partial = partial:sub(nl + 1)
+      end
+    end,
+    stderr = true,
+  }, function(res)
+    os.remove(body_file)
     feed(partial)
+    local code = res.signal ~= 0 and 128 + res.signal or res.code
     if api_err then
-      on_done("ollama: " .. api_err)
+      on_done(api_err)
     elseif code ~= 0 then
-      on_done(("curl exited %d: %s"):format(code, vim.trim(stderr)))
+      local msg = error_message(table.concat(rest, "\n")) or vim.trim(res.stderr or "")
+      on_done(("curl exited %d: %s"):format(code, msg))
     else
       on_done(nil)
     end
   end)
+  if not ok then
+    os.remove(body_file)
+    return nil, tostring(obj)
+  end
+  return {
+    cancel = function() pcall(obj.kill, obj, "sigterm") end,
+  }
 end
 
 return M

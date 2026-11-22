@@ -1,4 +1,4 @@
--- <Leader>a: ask a local model about the selection, or anything, and reply to
+-- <Leader>a: ask a model about the selection, or anything, and reply to
 -- its answer with <Leader>as. The module is nvim/lua/llm/ (no third-party
 -- plugin); this file only registers mappings, and
 -- the module is required on first use, so startup pays nothing for it.
@@ -7,6 +7,11 @@
 local function call(fn)
   return function() require("llm")[fn]() end
 end
+
+-- which-key calls a function label each time the popup opens, so this
+-- follows `:let $HABITUS_LLM_URL = ...` without a restart. which-key has no
+-- per-entry colour for group labels, so the text says it instead of graying.
+local function group_label() return require("llm.backend").configured() and "󰚩 AI" or "󰚩 AI (no server)" end
 
 ---@type LazySpec
 return {
@@ -18,7 +23,7 @@ return {
     local prefix = "<Leader>a"
 
     for _, mode in ipairs { "n", "x" } do
-      maps[mode][prefix] = { desc = "󰚩 AI" }
+      maps[mode][prefix] = { desc = group_label }
       maps[mode][prefix .. "a"] = { call "menu", desc = "Menu" }
       maps[mode][prefix .. "p"] = { call "prompt", desc = mode == "x" and "Ask about selection" or "Ask" }
     end
@@ -26,5 +31,6 @@ return {
     maps.n[prefix .. "s"] = { call "send", desc = "Send the conversation" }
     maps.n[prefix .. "x"] = { call "cancel", desc = "Stop generating" }
     maps.n[prefix .. "m"] = { call "pick_model", desc = "Pick model" }
+    maps.n[prefix .. "t"] = { call "toggle_thinking", desc = "Toggle thinking" }
   end,
 }

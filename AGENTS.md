@@ -64,11 +64,10 @@ shell/
 ├── bin/                # Standalone executable scripts, symlinked to ~/.local/bin
 ├── topics/*.sh         # Auto-sourced topic files, split by concern
 ├── python/             # Default Python env: pyproject.toml + uv.lock (.venv gitignored)
-├── llama/models.conf   # Model aliases for the `llama` local-LLM wrapper (bin/llama)
 ├── zsh-profile/.zshenv # Stand-in .zshenv that bin/zsh-profile points ZDOTDIR at to load zprof first
 └── local.d/*.sh        # Gitignored machine-specific overrides
 
-setup/               # Optional install scripts (Neovim's system deps, ghostty, llama.cpp, rpi-imager, capslock disable)
+setup/               # Optional install scripts (Neovim's system deps, ghostty, rpi-imager, capslock disable)
 systemd/             # User manager drop-ins, symlinked into ~/.config/systemd/user.conf.d by 80-systemd
 tmux/                # tmux.conf, symlinked to ~/.tmux.conf by 60-tmux
 vim/                 # Vim config (vimrc symlinked to ~/.vimrc)
@@ -173,82 +172,61 @@ is the only place they surface during install.
 add it to both: the package to the script's `PACKAGES` (with a line in its
 header saying what needs it), and the command to `_nvim_check_deps`.
 
-## Local LLM (`llama`)
-
-`shell/bin/llama` asks a local model a question **without a server**: every
-call loads the GGUF (mmap'd, so warm loads come from the page cache), answers,
-and exits. `llama "q"` one-shots to stdout; piped stdin is appended to the
-prompt; `llama` alone on a TTY opens an interactive chat (`llama-cli`).
-
-- `setup/install-llama-cpp.sh` builds llama.cpp from source with
-  `GGML_NATIVE=ON` (static, only `llama-cli`/`llama-completion`/`llama-bench`)
-  into `~/.local/opt/llama.cpp`, then pulls the models. No sudo. The tag is
-  pinned by the script's default for `HABITUS_LLAMA_CPP_REF`; to bump it,
-  change that default and rerun (`$PREFIX/REF` makes reruns at the same ref a
-  no-op).
-- `shell/llama/models.conf` is the source of truth for model aliases
-  (`default` = Gemma 4 E2B, fast; `smart` = Qwen3.5-4B, slower) and per-model
-  sampling args. Its header records the benchmark behind the choice. `llama pull`
-  downloads into `~/.local/share/llama/models` and verifies the sha256 that
-  Hugging Face reports as `X-Linked-Etag`. To switch models, edit the line and
-  `llama pull <alias>`; check speed with `llama bench <alias>`.
-- Thinking is forced off by a per-model `shell/llama/*-nothink.jinja` template,
-  passed through `models.conf` (`{confdir}` expands to that directory).
-  `llama-completion` rejects `--chat-template-kwargs`, ignores `-rea off`, and
-  always injects a system message; with the stock templates both models
-  reasoned for minutes on a large share of prompts, even "hello". A new model
-  needs the same check: run it across a few seeds and look for thinking.
-- A concise system prompt is on by default (`SYSTEM_DEFAULT`): unprompted,
-  answers ran 200-550 words and a minute or more. `-s` replaces it,
-  `HABITUS_LLAMA_SYSTEM` sets it, and an empty value (`-s ''`) turns it off. Don't
-  tighten it to "as brief as possible": the default model then guesses
-  instead of working the answer out (a wrong curl flag, wrong arithmetic).
-  The numbers are in the `models.conf` header. The Neovim module inherits it.
-- One-shot output goes through `llama-completion`. `clean_stream` drops the
-  trailing `[end of text]`, and if the model opens a `<think>` block anyway, the
-  reasoning goes to stderr and the answer alone to stdout, all while streaming.
-  `llama-cli` is only used for interactive chat because it prints a banner on
-  stdout.
-- Inference runs under `nice -n ${HABITUS_LLAMA_NICE:-10}`. Generating saturates the 4
-  cores it uses, which is expected, and the lower priority keeps the desktop
-  responsive.
-- Stdin is read only when it is a pipe or regular file — an inherited open
-  stdin (cron, editors, `&`) would otherwise block forever.
-- Wrapper env vars are `HABITUS_LLAMA_MODEL`, `HABITUS_LLAMA_THREADS`,
-  `HABITUS_LLAMA_CTX`, `HABITUS_LLAMA_NICE`, `HABITUS_LLAMA_MODEL_DIR`,
-  `HABITUS_LLAMA_BIN`, `HABITUS_LLAMA_DEBUG`, `HABITUS_LLAMA_SYSTEM` (see
-  [Environment Variables](#environment-variables)).
-
 ## Neovim LLM (`<Leader>a`)
 
 `nvim/lua/llm/` sends a selection (with an optional prompt), or a bare prompt,
 to a model and streams the answer into a markdown scratch buffer (`llm://answer`)
 in a right split. It is an in-repo module, not a plugin; `nvim/lua/plugins/llm.lua`
 only adds the `<Leader>a` mappings (`aa` menu, `ap` ask, `ao` show/hide, `as`
-send the conversation, `ax` stop, `am` model). The keys available in the answer
+send the conversation, `ax` stop, `am` model, `at` thinking on/off). The keys available in the answer
 buffer are listed at the top of `llm/init.lua`.
 
 - **The answer buffer is the conversation.** Turns sit under separator lines
-  (`── you ──`, `── <backend>:<model> ──`; `ui.header`). After each answer a new
+  (`── you ──`, `── <model> ──`; `ui.header`). After each answer a new
   `── you ──` turn is opened, and `<C-s>` (or `<Leader>as`) re-parses the
   *whole buffer* and sends it, so any edit (a reworded question, a trimmed
   answer) is what the model sees. There is no hidden history: `ui.turns()` on the buffer text is the only
-  source. Ollama gets real chat messages; `llama` is one-shot, so
-  `backend.lua` flattens earlier turns into the prompt as quoted context.
+  source; each turn goes to the server as a chat message.
 - Because the buffer is meant to be edited, its put-back keys avoid Vim's
   editing keys (`gA`/`gR`, not `A`/`R`).
-- **Backend:** the `llama` wrapper by default, so models and sampling stay in
-  `shell/llama/models.conf`. If `$HABITUS_OLLAMA_URL` is set and non-empty,
-  requests go to that Ollama server's `/api/chat` instead.
-  `$HABITUS_OLLAMA_MODEL` picks the model;
-  if it is unset, the first model `/api/tags` lists is used. Set both
-  per machine in `shell/local.d/`. The env is read on every request. The module
-  deliberately does not use `$OLLAMA_HOST`, which the ollama CLI reads itself.
-- **The message goes to `llama` in argv, not stdin.** libuv gives children a
-  socketpair, and the wrapper's stdin guard (above) correctly ignores sockets.
-- Requests run in their own process group (`detach`), and cancelling kills the
-  whole group. Signalling only the bash wrapper would leave `llama-completion`
-  running.
+- **Backend:** any OpenAI-compatible server (`/chat/completions`, streamed as
+  SSE). `$HABITUS_LLM_URL` is its base URL including the version path
+  (`http://<host>:<port>/v1`), as OpenAI's SDKs take it.
+  `$HABITUS_LLM_API_KEY`, if set, is sent as a bearer token. Set them per
+  machine in `shell/local.d/`; the env is read on every request. With no URL
+  set, a request fails with a message saying so, and the `<Leader>a` which-key
+  label reads `AI (no server)`. which-key has no per-entry colour for group
+  labels, so the text says it rather than graying out; the label is a function,
+  re-evaluated each time the popup opens. The module deliberately does
+  not read `$OPENAI_BASE_URL`/`$OPENAI_API_KEY`, which OpenAI's SDKs and other
+  tools read themselves.
+- **Model choice**, first match wins: the `<Leader>am` pick (per URL, for the
+  session), `$HABITUS_LLM_MODEL`, the model `/models` reports loaded, the one
+  used last, the first one listed. llama-swap lists every model it can start
+  and marks each with `status.value`; requesting an unloaded one makes it
+  unload the running model and load that one, so without a pick the module
+  re-lists `/models` before every request and follows whatever is loaded. With
+  several loaded (llama-swap groups) it stays on the one it used last.
+- **Headers go to curl on stdin (`-H @-`) and the body in a temp file**, so the
+  API key never appears in argv, where `ps` would show it.
+- A concise system prompt is sent by default (`SYSTEM_DEFAULT` in
+  `backend.lua`): without one, a small local model's answers ran 200-550 words
+  and a minute or more. `$HABITUS_LLM_SYSTEM` replaces it and set-but-empty
+  turns it off (read with `vim.uv.os_getenv`, since `vim.env` reports an empty
+  variable as unset). Don't tighten it to "as brief as possible": small models
+  then guess instead of working the answer out.
+- **Thinking is off by default**: every request sends
+  `chat_template_kwargs: {enable_thinking: false}`, which vLLM and llama-server
+  hand to the chat template (Qwen-style templates read it; others ignore it).
+  `<Leader>at` or the menu flips it to `true` for the session. A server that
+  rejects unknown fields (OpenAI's own API) would refuse the request; vLLM
+  behind llama-swap accepts it. `reasoning_effort` also turned thinking off on
+  vLLM, but its values mean different things per server, so it isn't used.
+- Streamed `delta.reasoning` / `delta.reasoning_content` (vLLM, llama-server)
+  never goes in the buffer; while it arrives the status line counts
+  `thinking Ns`, and the final status adds `(thought Ns)`. A server that puts
+  reasoning inline in `content` (`<think>…`) is set up to do so; turn that off
+  on the server.
 - **Closing the answer window cancels; hiding it does not.** `WinClosed` (last
   window showing the buffer) and `BufUnload`/`BufWipeout` call `M.cancel()`;
   `M.toggle` sets a `hiding` flag around its close so `<Leader>ao` and the menu
@@ -292,13 +270,13 @@ The orchestrator picks the file up automatically via the sorted glob. Files star
 ## Environment Variables
 
 Every setting this repo invents is read from a `HABITUS_` name, with the tool
-it configures next: `HABITUS_LLAMA_MODEL`, `HABITUS_OLLAMA_URL`,
-`HABITUS_GHOSTTY_VERSION`. A bare `LLAMA_*` or `OLLAMA_*` sits in that tool's
-own namespace, where llama.cpp (`LLAMA_ARG_*`, `LLAMA_CACHE`, `LLAMA_LOG_*`) or
-ollama (`OLLAMA_HOST`) may already read it, or start to in a later release.
+it configures next: `HABITUS_LLM_URL`, `HABITUS_NODE_VERSION`,
+`HABITUS_GHOSTTY_VERSION`. A bare name sits in some other tool's namespace,
+where it may already be read (`OPENAI_BASE_URL` by OpenAI's SDKs, `NODE_*` by
+Node), or start to be in a later release.
 
 The rule covers what a user sets, not a script's internal variables
-(`LLAMA_CPP_REF="${HABITUS_LLAMA_CPP_REF:-b11193}"` is fine). Variables other
+(`GHOSTTY_VERSION="${HABITUS_GHOSTTY_VERSION:-1.3.1}"` is fine). Variables other
 programs define (`HOME`, `XDG_*`, `EDITOR`, `NO_COLOR`) keep their names.
 
 ## Shell Compatibility Rules

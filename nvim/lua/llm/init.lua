@@ -2,8 +2,8 @@
 --
 -- <Leader>aa opens a small menu; the answer streams into a markdown buffer on
 -- the right (see ui.lua), from where it can be copied back into the buffer the
--- question came from. The backend is the `llama` wrapper unless
--- $HABITUS_OLLAMA_URL is set (see backend.lua). Mappings live in plugins/llm.lua.
+-- question came from. The model is any OpenAI-compatible server named by
+-- $HABITUS_LLM_URL (see backend.lua). Mappings live in plugins/llm.lua.
 --
 -- The answer buffer is the conversation: after each answer it offers a new
 -- `── you ──` turn, and <C-s> (or <Leader>as, from anywhere) sends the whole
@@ -94,7 +94,7 @@ end
 ---@param level? integer
 local function notify(msg, level) vim.notify(msg, level or vim.log.levels.INFO, { title = "llm" }) end
 
-local function label() return backend.name() .. ":" .. backend.peek_model() end
+local function label() return backend.peek_model() end
 
 --- Open a new user turn at the end of the conversation, cursor-ready.
 local function reply_turn()
@@ -190,6 +190,10 @@ local function converse()
     return notify(("nothing to send: write under the last '%s' line"):format(ui.header(ui.YOU)), vim.log.levels.WARN)
   end
   local messages = vim.tbl_map(function(t) return { role = t.role, content = table.concat(t.lines, "\n") } end, turns)
+  -- Resolved before touching the buffer: the answer header names it, and a
+  -- request that cannot start (no server, unreachable) leaves no empty turn.
+  local model, model_err = backend.model()
+  if not model then return notify(model_err or "could not pick a model", vim.log.levels.ERROR) end
 
   state.id = state.id + 1
   local id = state.id
@@ -200,14 +204,14 @@ local function converse()
   if vim.api.nvim_get_current_win() == win then
     vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(ui.buf()), 0 })
   end
-  ui.append("\n\n" .. ui.header(label()) .. "\n\n")
+  ui.append("\n\n" .. ui.header(model) .. "\n\n")
 
   local what = last.lines[1]
   if #last.lines > 1 then what = what .. "…" end
   if vim.fn.strchars(what) > 60 then what = vim.fn.strcharpart(what, 0, 57) .. "…" end
   local started = vim.uv.hrtime()
   local function status(mark, hint)
-    ui.status(("%s %s · %s%s"):format(mark, label(), what, hint and " · " .. hint or ""))
+    ui.status(("%s %s · %s%s"):format(mark, model, what, hint and " · " .. hint or ""))
   end
   local function finish(mark, hint)
     state.job = nil
@@ -215,11 +219,35 @@ local function converse()
     status(mark, hint)
   end
 
+  -- While the model reasons, the status counts the seconds; `thought` keeps
+  -- the total for the final status. Some servers send a stray reasoning
+  -- delta after the answer has started, so reasoning only counts before it.
+  local thinking_since, thought, shown, answering = nil, nil, -1, false
+  local function on_reasoning()
+    vim.schedule(function()
+      if id ~= state.id or answering then return end
+      local now = vim.uv.hrtime()
+      thinking_since = thinking_since or now
+      local secs = math.floor((now - thinking_since) / 1e9)
+      if secs ~= shown then
+        shown = secs
+        status("⋯", ("thinking %ds"):format(secs))
+      end
+    end)
+  end
+
   -- Models often open with a newline; the header already has its blank line.
   local fresh = true
-  local job, err = backend.run(messages, function(chunk)
+  local job, err = backend.run(model, messages, function(chunk)
     vim.schedule(function()
       if id ~= state.id then return end
+      if not answering then
+        answering = true
+        if thinking_since then
+          thought = (vim.uv.hrtime() - thinking_since) / 1e9
+          status "⋯"
+        end
+      end
       if fresh then
         chunk = chunk:gsub("^%s+", "")
         if chunk == "" then return end
@@ -231,6 +259,8 @@ local function converse()
     vim.schedule(function()
       if id ~= state.id then return end
       local secs = ("%.1fs"):format((vim.uv.hrtime() - started) / 1e9)
+      if thinking_since and not thought then thought = (vim.uv.hrtime() - thinking_since) / 1e9 end
+      if thought then secs = ("%s (thought %ds)"):format(secs, math.floor(thought + 0.5)) end
       if run_err then
         finish("✗ " .. secs, "<C-s>/<Leader>as retry")
         notify(run_err, vim.log.levels.ERROR)
@@ -238,7 +268,7 @@ local function converse()
         finish("✓ " .. secs, "<C-s>/<Leader>as reply")
       end
     end)
-  end)
+  end, on_reasoning)
   if not job then
     finish("✗", "<C-s>/<Leader>as retry")
     return notify(err or "could not start the request", vim.log.levels.ERROR)
@@ -303,11 +333,16 @@ function M.toggle()
   end
 end
 
+function M.toggle_thinking() notify("thinking " .. (backend.toggle_thinking() and "on" or "off")) end
+
 function M.pick_model()
   local models, err = backend.models()
   if not models then return notify(err or "could not list models", vim.log.levels.ERROR) end
-  vim.ui.select(models, { prompt = "Model (" .. backend.name() .. ")" }, function(choice)
-    if choice then backend.set_model(choice) end
+  vim.ui.select(models, {
+    prompt = "Model",
+    format_item = function(m) return m.loaded and m.id .. "  (loaded)" or m.id end,
+  }, function(choice)
+    if choice then backend.set_model(choice.id) end
   end)
 end
 
@@ -331,6 +366,7 @@ function M.menu()
   add(ui.win() and "Hide the answer" or "Show the last answer", M.toggle)
   if state.job then add("Stop generating", M.cancel) end
   add("Model: " .. label() .. " (change…)", M.pick_model)
+  add("Thinking: " .. (backend.thinking() and "on (turn off)" or "off (turn on)"), M.toggle_thinking)
 
   vim.ui.select(items, {
     prompt = "LLM",
