@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# eval-network — evaluate this machine's network link, latency and lag under load
+#
+# Usage: eval-network [OPTIONS]
+#   -d, --duration SECS  How long to measure idle latency (default: 15)
+#   -H, --host HOST      Also measure latency to HOST; repeatable (e.g. a TV)
+#   -i, --iface IFACE    Interface to report (default: the default route's)
+#   -l, --load           Also measure throughput and latency under load; this
+#                        downloads ~200 MB and uploads ~40 MB (speed.cloudflare.com)
+#   -t, --target HOST    Internet latency target (default: 1.1.1.1)
+#   -h, --help           Show this help message
+#
+# Every measurement is rated EXCELLENT or GOOD (green), FAIR (yellow), or POOR
+# or BAD (red), with a hint under anything below GOOD. The ratings are rules of
+# thumb for streaming, calls and gaming at home; each threshold sits next to
+# its rate call (signal follows common Wi-Fi survey bands, bufferbloat
+# follows the Waveform A+..F grades).
+# Needs ip and ping; iw adds Wi-Fi details; curl is needed for --load.
+set -euo pipefail
+IFS=$'\n\t'
+
+DOWN_URL='https://speed.cloudflare.com/__down?bytes=25000000'
+UP_URL='https://speed.cloudflare.com/__up'
+
+die() {
+  printf 'eval-network: %s\n' "$1" >&2
+  exit 1
+}
+
+LEVELS=(EXCELLENT GOOD FAIR POOR BAD)
+
+# rate VALUE T1 T2 T3 T4 DIR: with DIR "low" (lower is better) VALUE <= T1 is
+# EXCELLENT, <= T2 GOOD, <= T3 FAIR, <= T4 POOR, else BAD; with DIR "high"
+# the comparisons are >=.
+rate() {
+  awk -v v="$1" -v a="$2" -v b="$3" -v c="$4" -v d="$5" -v dir="$6" 'BEGIN {
+    split("EXCELLENT GOOD FAIR POOR BAD", L, " "); split(a " " b " " c " " d, T, " ")
+    for (i = 1; i <= 4; i++) if (dir == "low" ? v <= T[i] : v >= T[i]) { print L[i]; exit }
+    print L[5] }'
+}
+
+# worst RATING...: the lowest of the given ratings.
+worst() {
+  local r i out=0
+  for r in "$@"; do
+    for i in "${!LEVELS[@]}"; do
+      [[ "${LEVELS[$i]}" == "$r" ]] && ((i > out)) && out=$i
+    done
+  done
+  printf '%s\n' "${LEVELS[$out]}"
+}
+
+# row LABEL VALUE RATING [HINT]: the hint is shown only below GOOD.
+row() {
+  local tag
+  case "$3" in
+  EXCELLENT) tag="${bold}${green}[EXCELLENT]${reset}" ;;
+  GOOD) tag="${green}[GOOD]${reset}" ;;
+  FAIR) tag="${yellow}[FAIR]${reset}" ;;
+  POOR) tag="${red}[POOR]${reset}" ;;
+  BAD) tag="${bold}${red}[BAD]${reset}" ;;
+  *) tag="" ;;
+  esac
+  printf '  %-11s %-64s %s\n' "$1" "$2" "$tag"
+  if [[ -n "${4:-}" && "$3" =~ ^(FAIR|POOR|BAD)$ ]]; then
+    printf '  %11s %s-> %s%s\n' '' "$dim" "$4" "$reset"
+  fi
+}
+
+header() { printf '\n%s%s%s\n' "$bold" "$1" "$reset"; }
+
+# ping_stats FILE: prints "loss_pct p50 p90 max received" from ping output.
+ping_stats() {
+  awk '
+    /time=/ { split($0, a, "time="); split(a[2], b, " "); t[++n] = b[1] + 0 }
+    /packets transmitted/ { sent = $1 + 0 }
+    END {
+      if (!sent) sent = n
+      if (!n) { printf "%.1f - - - 0\n", 100; exit }
+      for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) if (t[j] < t[i]) { x = t[i]; t[i] = t[j]; t[j] = x }
+      p50 = t[int((n - 1) * 0.5) + 1]; p90 = t[int((n - 1) * 0.9) + 1]
+      printf "%.1f %.1f %.1f %.1f %d\n", (sent - n) * 100 / sent, p50, p90, t[n], n
+    }' "$1"
+}
+
+# Latency thresholds: hosts on the local link (no gateway hop) are held to
+# LAN standards; anything routed through the gateway to internet ones.
+is_local() { ! ip route get "$1" 2>/dev/null | grep -q ' via '; }
+
+latency_row() {
+  local label=$1 host=$2 file=$3 loss p50 p90 max n r hint
+  IFS=' ' read -r loss p50 p90 max n <<<"$(ping_stats "$file")"
+  if [[ "$n" -eq 0 ]]; then
+    # Without its "PING host" banner, ping itself failed (permissions, bad
+    # name); show its error instead of blaming the host.
+    if grep -q '^PING ' "$file"; then
+      row "$label" "$host  no replies" BAD "host unreachable or blocks ping"
+    else
+      row "$label" "$host  ping failed" BAD \
+        "$(grep -m1 . "$file" | sed -E 's/^.*: line [0-9]+: //' || echo 'ping produced no output')"
+    fi
+    return
+  fi
+  # Loss: 0 / 0.5 / 2 / 5 %. Latency: median (p50) and spikes (p90), in ms.
+  if is_local "$host"; then
+    r=$(worst "$(rate "$p50" 2 5 10 30 low)" "$(rate "$p90" 5 20 50 150 low)" \
+      "$(rate "$loss" 0 0.5 2 5 low)")
+    hint="slow or lossy replies from a local device point at the Wi-Fi/LAN hop"
+  else
+    r=$(worst "$(rate "$p50" 15 30 60 100 low)" "$(rate "$p90" 25 50 100 200 low)" \
+      "$(rate "$loss" 0 0.5 2 5 low)")
+    hint="if the gateway rates well, the delay is beyond it (ISP or route)"
+  fi
+  # Under load the Bufferbloat row carries the verdict; these are context.
+  [[ "${4:-}" == unrated ]] && r=""
+  row "$label" "$(printf '%-15s loss %4s%%  p50 %5s  p90 %5s  max %5s ms' "$host" "$loss" "$p50" "$p90" "$max")" "$r" "$hint"
+}
+
+link_section() {
+  local iface=$1 info ssid freq sig rx tx band ch lo r speed
+  header "Link"
+  if command -v iw >/dev/null && info=$(iw dev "$iface" link 2>/dev/null) && [[ "$info" != Not\ connected* ]]; then
+    ssid=$(awk -F': ' '/SSID:/ {print $2; exit}' <<<"$info")
+    freq=$(awk '/freq:/ {printf "%d", $2; exit}' <<<"$info")
+    sig=$(awk '/signal:/ {print $2; exit}' <<<"$info")
+    rx=$(awk '/rx bitrate:/ {printf "%d", $3; exit}' <<<"$info")
+    tx=$(awk '/tx bitrate:/ {printf "%d", $3; exit}' <<<"$info")
+    row Interface "$iface (Wi-Fi) on ${ssid:-?}" ""
+    if ((freq >= 5955)); then
+      band="6 GHz" ch=$(((freq - 5950) / 5))
+    elif ((freq >= 5000)); then
+      band="5 GHz" ch=$(((freq - 5000) / 5))
+    elif ((freq == 2484)); then
+      band="2.4 GHz" ch=14
+    else
+      band="2.4 GHz" ch=$(((freq - 2407) / 5))
+    fi
+    case "$band" in
+    "6 GHz") r=EXCELLENT ;;
+    "5 GHz") r=GOOD ;;
+    *) r=FAIR ;;
+    esac
+    row Band "$band  (channel $ch, $freq MHz)" "$r" \
+      "2.4 GHz is slower and more crowded; use a 5/6 GHz network if it reaches here"
+    # -67 dBm is the usual floor for calls and streaming, -70 for reliable
+    # browsing, -80 for any connection at all.
+    row Signal "${sig:-?} dBm" "$(rate "${sig:--100}" -50 -67 -70 -80 high)" \
+      "weak signal: expect stutter on calls/streams; move closer or add an access point"
+    lo=$((rx < tx ? rx : tx))
+    row "Link rate" "rx ${rx:-?} / tx ${tx:-?} Mbit/s  (real throughput ~half)" \
+      "$(rate "$lo" 500 200 100 50 high)" "low link rate caps throughput; usually signal or band"
+  elif [[ -d "/sys/class/net/$iface/wireless" ]]; then
+    row Interface "$iface (Wi-Fi; install iw for band and signal)" ""
+  else
+    speed=$(cat "/sys/class/net/$iface/speed" 2>/dev/null || printf '?')
+    row Interface "$iface (wired)" ""
+    row Speed "$speed Mbit/s" "$(rate "${speed//\?/0}" 2500 1000 500 100 high)" \
+      "below gigabit: check the cable, port or adapter"
+  fi
+}
+
+# load_phase DIR GATEWAY TARGET: prints "down_mbps up_mbps" after writing
+# loaded pings to DIR/load-gw.txt and DIR/load-net.txt.
+load_phase() {
+  local dir=$1 gw=$2 target=$3 pings=() curls=() s down up i
+  ping -n -i 0.2 "$gw" >"$dir/load-gw.txt" 2>&1 &
+  pings+=($!)
+  ping -n -i 0.2 "$target" >"$dir/load-net.txt" 2>&1 &
+  pings+=($!)
+
+  s=$(date +%s.%N)
+  for i in 1 2 3 4 5 6 7 8; do
+    curl -s -o /dev/null --max-time 12 -w '%{size_download}\n' "$DOWN_URL" >"$dir/down.$i" 2>/dev/null &
+    curls+=($!)
+  done
+  wait "${curls[@]}" || true
+  down=$(mbps "$s" "$dir"/down.*)
+
+  head -c 10000000 /dev/urandom >"$dir/up.bin"
+  curls=()
+  s=$(date +%s.%N)
+  for i in 1 2 3 4; do
+    curl -s -o /dev/null --max-time 12 -w '%{size_upload}\n' \
+      --data-binary @"$dir/up.bin" "$UP_URL" >"$dir/up.$i" 2>/dev/null &
+    curls+=($!)
+  done
+  wait "${curls[@]}" || true
+  up=$(mbps "$s" "$dir"/up.[0-9])
+
+  # SIGINT makes ping print its summary line, which ping_stats uses for loss.
+  kill -INT "${pings[@]}" 2>/dev/null || true
+  wait "${pings[@]}" 2>/dev/null || true
+  printf '%s %s\n' "$down" "$up"
+}
+
+# mbps START FILE...: Mbit/s from the byte counts curl wrote into FILEs
+# since START (a `date +%s.%N` timestamp).
+mbps() {
+  local start=$1
+  shift
+  cat "$@" | awk -v s="$start" -v e="$(date +%s.%N)" \
+    '{b += $1} END {printf "%.0f", b * 8 / (e - s) / 1e6}'
+}
+
+main() {
+  local duration=15 iface="" target=1.1.1.1 load=false hosts=() gw tmp i h
+  local net_p50 down up ld_p90 bloat
+  while (($#)); do
+    case "$1" in
+    -d | --duration)
+      duration=${2:?--duration needs a value}
+      shift
+      ;;
+    -H | --host)
+      hosts+=("${2:?--host needs a value}")
+      shift
+      ;;
+    -i | --iface)
+      iface=${2:?--iface needs a value}
+      shift
+      ;;
+    -l | --load) load=true ;;
+    -t | --target)
+      target=${2:?--target needs a value}
+      shift
+      ;;
+    -h | --help)
+      sed -n '2,/^$/s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"
+      return 0
+      ;;
+    *) die "unknown option: $1 (see --help)" ;;
+    esac
+    shift
+  done
+  [[ "$duration" =~ ^[0-9]+$ && "$duration" -gt 0 ]] || die "--duration must be a positive whole number"
+  command -v ping >/dev/null || die "ping not found (install iputils-ping)"
+  command -v ip >/dev/null || die "ip not found (install iproute2)"
+  if [[ "$load" == true ]] && ! command -v curl >/dev/null; then die "--load needs curl"; fi
+
+  bold="" dim="" green="" yellow="" red="" reset=""
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    bold=$(tput bold 2>/dev/null || true) dim=$(tput dim 2>/dev/null || true)
+    green=$(tput setaf 2 2>/dev/null || true) yellow=$(tput setaf 3 2>/dev/null || true)
+    red=$(tput setaf 1 2>/dev/null || true) reset=$(tput sgr0 2>/dev/null || true)
+  fi
+
+  if [[ -n "$iface" ]]; then
+    gw=$(ip route show default dev "$iface" 2>/dev/null | awk '{print $3; exit}')
+  else
+    IFS=' ' read -r gw iface <<<"$(ip route show default 2>/dev/null | awk '{print $3, $5; exit}')"
+  fi
+  [[ -n "$iface" && -n "$gw" ]] || die "no default route${iface:+ on $iface}; are you connected?"
+
+  tmp=$(mktemp -d)
+  # Expanded now: tmp is main's local and is gone by the time EXIT fires.
+  # shellcheck disable=SC2064
+  trap "rm -rf -- ${tmp@Q}" EXIT
+
+  link_section "$iface"
+
+  header "Latency  (${duration}s idle, a ping every 0.2s)"
+  ping -n -i 0.2 -w "$duration" "$gw" >"$tmp/gw.txt" 2>&1 &
+  ping -n -i 0.2 -w "$duration" "$target" >"$tmp/net.txt" 2>&1 &
+  for i in "${!hosts[@]}"; do
+    ping -n -i 0.2 -w "$duration" "${hosts[$i]}" >"$tmp/host.$i.txt" 2>&1 &
+  done
+  wait
+  latency_row Gateway "$gw" "$tmp/gw.txt"
+  latency_row Internet "$target" "$tmp/net.txt"
+  for i in "${!hosts[@]}"; do
+    h=${hosts[$i]}
+    latency_row "Host" "$h" "$tmp/host.$i.txt"
+  done
+
+  [[ "$load" == true ]] || return 0
+  header "Under load  (one run; internet speed varies between runs)"
+  IFS=' ' read -r down up <<<"$(load_phase "$tmp" "$gw" "$target")"
+  # One 4K stream needs ~25 Mbit/s.
+  row Download "$down Mbit/s" "$(rate "$down" 500 100 25 10 high)" \
+    "under ~25 Mbit/s struggles with 4K streaming; compare with your plan"
+  row Upload "$up Mbit/s" "$(rate "$up" 100 20 10 3 high)" \
+    "low upload hurts video calls and cloud backups"
+  latency_row Gateway "$gw" "$tmp/load-gw.txt" unrated
+  latency_row Internet "$target" "$tmp/load-net.txt" unrated
+  IFS=' ' read -r _ net_p50 _ _ _ <<<"$(ping_stats "$tmp/net.txt")"
+  IFS=' ' read -r _ _ ld_p90 _ _ <<<"$(ping_stats "$tmp/load-net.txt")"
+  bloat=$(awk -v a="$ld_p90" -v b="$net_p50" 'BEGIN {d = a - b; printf "%.0f", d < 0 ? 0 : d}')
+  row Bufferbloat "+$bloat ms latency under load (p90 vs idle p50)" "$(rate "$bloat" 5 30 60 200 low)" \
+    "turn on SQM / Smart Queue / QoS in the router if it has it"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
