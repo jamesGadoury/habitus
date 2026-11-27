@@ -1,8 +1,8 @@
 #!/bin/sh
-# system-eval — System health and performance evaluation
+# eval-system — System health and performance evaluation
 # Compatible with: Ubuntu, Raspberry Pi OS
 #
-# Usage: system-eval [OPTIONS]
+# Usage: eval-system [OPTIONS]
 #   --bench              Include performance benchmarks (slower)
 #   --stress             Run stress tests with thermal monitoring
 #   --stress-duration N  Stress test duration in seconds (default: 60)
@@ -35,7 +35,7 @@ for arg in "$@"; do
         --full)             FLAG_BENCH=true; FLAG_STRESS=true ;;
         --no-color)         FLAG_NO_COLOR=true ;;
         -h|--help)          sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
-        *)                  printf 'system-eval: unknown option: %s\n' "$arg" >&2; exit 1 ;;
+        *)                  printf 'eval-system: unknown option: %s\n' "$arg" >&2; exit 1 ;;
     esac
 done
 unset _next_is_duration
@@ -65,10 +65,10 @@ _pass=0
 _warn=0
 _crit=0
 IS_RPI=false
-BENCH_TMPFILE="/tmp/.system-eval-disktest.$$"
-STRESS_THERMAL_LOG="/tmp/.system-eval-thermal.$$"
-STRESS_FREQ_LOG="/tmp/.system-eval-freq.$$"
-ISSUES_LOG="/tmp/.system-eval-issues.$$"
+BENCH_TMPFILE="/tmp/.eval-system-disktest.$$"
+STRESS_THERMAL_LOG="/tmp/.eval-system-thermal.$$"
+STRESS_FREQ_LOG="/tmp/.eval-system-freq.$$"
+ISSUES_LOG="/tmp/.eval-system-issues.$$"
 _thermal_monitor_pid=""
 _stress_pids=""
 
@@ -365,7 +365,7 @@ check_root() {
 
     printf '\n%bRunning without root — the following tests will be skipped or limited:%b\n' "$C_WARN" "$C_RST"
     printf "$_limited"
-    printf '\n  Run with: %bsudo system-eval %s%b\n' "$C_DIM" "$*" "$C_RST"
+    printf '\n  Run with: %bsudo eval-system %s%b\n' "$C_DIM" "$*" "$C_RST"
     printf '  for complete results.\n\n'
     printf '  Continue anyway? (Y/n) [default=Y] '
     read -r _answer < /dev/tty
